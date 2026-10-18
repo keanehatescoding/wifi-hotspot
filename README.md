@@ -88,6 +88,9 @@ and the AP comes up on that network's channel; roam and it re-pins.
 `pkexec` (falling back to `sudo`); set `WIFI_HOTSPOT_ELEVATE=sudo` to force a
 particular elevator.
 
+Full details are in [man/wifi-hotspot.8](man/wifi-hotspot.8) (`man wifi-hotspot`
+after installing).
+
 ## Configuration
 
 Edit `/etc/wifi-hotspot.conf`:

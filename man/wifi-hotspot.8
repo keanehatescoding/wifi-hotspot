@@ -1,0 +1,285 @@
+.\" Manual page for wifi-hotspot
+.TH WIFI\-HOTSPOT 8 "2026\-10\-19" "wifi\-hotspot" "System Administration"
+.SH NAME
+wifi\-hotspot \- share a Wi\-Fi client uplink as an access point on the same channel
+.SH SYNOPSIS
+.nf
+\fBwifi\-hotspot\fR { up | down | restart | sync | status }
+.fi
+.SH DESCRIPTION
+.B wifi\-hotspot
+runs a Wi\-Fi access point (hotspot) on a second virtual interface
+.RB ( ap0 )
+while the primary interface
+.RB ( wlan0 )
+stays associated to a Wi\-Fi network as a client, and forwards the hotspot
+clients' traffic to that uplink with NAT.
+.PP
+It exists because of a hardware limitation of single\-radio adapters:
+the hotspot must run on the
+.I same channel
+as the client connection.  Such adapters advertise this same\-channel
+concurrency (SCC) through
+.BR iw (8);
+for example, the Realtek RTL8852BE
+.RB ( rtw89 )
+reports:
+.PP
+.nf
+    * #{ managed } <= 1, #{ AP, P2P\-client, P2P\-GO } <= 1, total <= 2, #channels <= 1
+.fi
+.PP
+NetworkManager cannot drive both roles itself: activating a hotspot tears
+down the client connection, and its
+.BR wpa_supplicant (8)
+refuses to grab a second interface.  Windows instead silently puts the
+hotspot on the client's channel;
+.B wifi\-hotspot
+does the same thing on Linux.
+.PP
+The command creates the
+.B ap0
+interface, assigns it a unique locally administered MAC address, runs
+.BR hostapd (8)
+pinned to the uplink's channel, and starts
+.BR dnsmasq (8)
+for DHCP and DNS.  It also adds the required NAT, forwarding and firewall
+rules and removes them again on
+.BR down .
+.SH COMMANDS
+.TP
+.B up
+Create or ensure the hotspot on the client's current channel.  Idempotent:
+if the hotspot is already running on the right channel this only refreshes
+the network and firewall rules.
+.TP
+.B down
+Tear the hotspot down: stop hostapd and dnsmasq, remove the firewall and
+NAT rules and delete the
+.B ap0
+interface.  The client connection is left untouched.
+.TP
+.B restart
+Equivalent to
+.B down
+followed by
+.BR up .
+Use after editing
+.I /etc/wifi\-hotspot.conf
+or the hotspot password.
+.TP
+.B sync
+Re\-pin the hotspot to the client's current channel.  Does nothing if the
+client is disconnected or the channel already matches.  This is what the
+NetworkManager dispatcher calls on reconnect and roaming.
+.TP
+.B status
+Show the client SSID and frequency, the AP interface, and whether hostapd,
+dnsmasq and the NAT rule are up.  This is the default when no command is
+given and it does
+.I not
+require root.
+.PP
+Except for
+.BR status ,
+the commands re\-execute themselves as root using
+.BR pkexec (1)
+(falling back to
+.BR sudo (8)),
+so they may be run by an ordinary user.
+.SH OPTIONS
+None.  Behaviour is controlled by the configuration file described below.
+.SH CONFIGURATION
+.I /etc/wifi\-hotspot.conf
+is a shell fragment sourced by the script.  All settings are optional and
+default to the values shown.  Uncomment and edit as needed.
+.TP
+.B CLIENT="wlan0"
+The Wi\-Fi client interface whose connection is shared.
+.TP
+.B AP="ap0"
+The virtual access point interface created and removed by the script.
+.TP
+.B SSID="ArchHotspot"
+The hotspot SSID.
+.TP
+.B COUNTRY="KE"
+Two\-letter ISO 3166 country code written as
+.B country_code
+to the hostapd configuration.  Set it so the regulatory domain permits
+your AP channel.
+.TP
+.B AP_ADDR="10.42.0.1"
+IPv4 address assigned to the AP interface.
+.TP
+.B AP_PREFIX="24"
+Prefix length of the hotspot subnet.
+.TP
+.B DHCP_RANGE="10.42.0.10,10.42.0.200,12h"
+dnsmasq DHCP range (first address, last address, lease time).
+.TP
+.B RUN_DIR="/run"
+Directory for pid and lease files.
+.TP
+.B MANAGE_FIREWALL=1
+When 0, the script makes no firewall, forwarding or NAT changes at all.
+Set this if you manage the firewall yourself (see
+.BR FIREWALL ).
+.PP
+The Wi\-Fi password is read once from the NetworkManager profile named
+after
+.B SSID
+(or
+.BR Hotspot ),
+generated if not found, and stored in
+.IR /etc/hostapd/ap0.psk .
+To change it, delete that file and run
+.B wifi\-hotspot restart
+(and reconnect the clients).
+.SH ENVIRONMENT
+.TP
+.B WIFI_HOTSPOT_ELEVATE
+Command used to re\-execute the script as root, e.g.
+.BR sudo .
+When unset,
+.B pkexec
+is used if available, otherwise
+.BR sudo .
+.SH FIREWALL
+On a host whose firewall has a default\-drop policy for incoming and
+forwarded traffic \- for example Arch's
+.I /etc/nftables.conf
+\- a plain
+.BR iptables (8)
+rule is
+.I not
+enough to make the hotspot work: a packet must be accepted by
+.I every
+base chain attached to a netfilter hook, so a
+.B policy drop
+in a native nftables chain silently overrides an
+.B iptables
+ACCEPT in a different chain.
+.PP
+When
+.B MANAGE_FIREWALL
+is 1,
+.B wifi\-hotspot
+additionally inserts a scoped
+.B accept
+rule for the AP interface into the existing nftables
+.I ip filter
+.B INPUT
+and
+.B forward
+chains.  The rules carry the comment
+.RB ` wifi\-hotspot '
+and are deleted again on
+.BR down .
+No nftables rules are added if the
+.I ip filter
+table does not exist.
+.SH FILES
+.TP
+.I /usr/local/bin/wifi\-hotspot
+The script.
+.TP
+.I /etc/wifi\-hotspot.conf
+Configuration file.
+.TP
+.I /etc/hostapd/ap0.conf
+Generated hostapd configuration (mode 0600), rewritten on every
+.BR up .
+.TP
+.I /etc/hostapd/ap0.psk
+The hotspot passphrase (mode 0600).
+.TP
+.I /run/hostapd\-ap0.pid
+hostapd pid file.
+.TP
+.I /run/dnsmasq\-ap0.pid
+dnsmasq pid file.
+.TP
+.I /run/dnsmasq\-ap0.leases
+dnsmasq DHCP leases.
+.TP
+.I /etc/systemd/system/wifi\-hotspot.service
+Oneshot unit that brings the hotspot up at boot.
+.TP
+.I /etc/NetworkManager/dispatcher.d/90\-wifi\-hotspot
+Dispatcher hook that runs
+.B sync
+on connect or roaming and
+.B down
+on disconnect.
+.SH NOTES
+.TP
+.B Same channel is mandatory
+The AP is always pinned to the client's channel; this is a limit of the
+radio, not of the tool.  The dispatcher does the pinning automatically
+when you roam.
+.TP
+.B Throughput is roughly halved
+One radio time\-shares between the two roles, on both links.  Share an
+ethernet uplink instead for full speed.
+.TP
+.B 5 GHz DFS channels
+Channels 52\-64 and 100\-144 require radar detection
+.RB ( 802.11h )
+and add a channel availability check (CAC) delay; non\-DFS 5 GHz and
+2.4 GHz channels start immediately.
+.TP
+.B Regulatory domain
+The AP can only use channels allowed for
+.B COUNTRY
+in the current regulatory domain.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Failure \- for example hostapd could not start, the client is not
+connected, or a required program is missing.  Diagnostic messages are
+printed to standard error and, when running under systemd,
+.B wifi\-hotspot.service
+is logged to the journal.
+.SH EXAMPLES
+Bring the hotspot up and check it:
+.PP
+.nf
+.RS
+# wifi\-hotspot up
+$ wifi\-hotspot status
+client wlan0 :  SSID: MyNet  freq: 5180.0
+ap     ap0   :  type AP  channel 36 (5180 MHz)
+hostapd      : running
+dnsmasq      : running
+nat          : ? (need root)
+.RE
+.fi
+.PP
+Re\-create the hotspot after changing the SSID or password, then tear it
+down:
+.PP
+.nf
+.RS
+# wifi\-hotspot restart
+# wifi\-hotspot down
+.RE
+.fi
+.SH SEE ALSO
+.BR hostapd (8),
+.BR dnsmasq (8),
+.BR iw (8),
+.BR nmcli (1),
+.BR pkexec (1),
+.BR iptables (8),
+.BR nft (8),
+.BR NetworkManager (8)
+.PP
+Project home: https://github.com/keanehatescoding/wifi\-hotspot
+.SH AUTHOR
+Written by Keane Mbae.
+.SH COPYRIGHT
+MIT License.

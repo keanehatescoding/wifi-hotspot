@@ -10,6 +10,7 @@ install -Dm755 "$here/bin/wifi-hotspot"               /usr/local/bin/wifi-hotspo
 install -Dm644 "$here/config/wifi-hotspot.conf"       /etc/wifi-hotspot.conf
 install -Dm644 "$here/systemd/wifi-hotspot.service"   /etc/systemd/system/wifi-hotspot.service
 install -Dm755 "$here/NetworkManager/90-wifi-hotspot" /etc/NetworkManager/dispatcher.d/90-wifi-hotspot
+install -Dm644 "$here/man/wifi-hotspot.8"             /usr/local/share/man/man8/wifi-hotspot.8
 chown root:root /etc/NetworkManager/dispatcher.d/90-wifi-hotspot
 
 systemctl daemon-reload
