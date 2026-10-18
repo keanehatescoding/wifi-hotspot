@@ -1,0 +1,15 @@
+[Unit]
+Description=Wi-Fi hotspot sharing the Wi-Fi client uplink (same channel)
+Documentation=man:hostapd(8)
+After=NetworkManager.service NetworkManager-wait-online.service network-online.target
+Wants=NetworkManager-wait-online.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/usr/local/bin/wifi-hotspot up
+ExecStop=/usr/local/bin/wifi-hotspot down
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

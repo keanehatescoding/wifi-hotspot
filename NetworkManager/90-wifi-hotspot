@@ -1,0 +1,10 @@
+#!/bin/sh
+# NetworkManager dispatcher: keep the same-channel Wi-Fi hotspot in sync with
+# the Wi-Fi client uplink.  Runs as root; started by NetworkManager directly.
+CLIENT="${WIFI_HOTSPOT_CLIENT:-wlan0}"
+[ "$1" = "$CLIENT" ] || exit 0
+case "$2" in
+  up|dhcp4-change|connectivity-change) exec /usr/local/bin/wifi-hotspot sync ;;
+  down)                              exec /usr/local/bin/wifi-hotspot down ;;
+esac
+exit 0

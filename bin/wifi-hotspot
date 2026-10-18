@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+#
+# wifi-hotspot - share the Wi-Fi *client* uplink as an access point on the SAME
+# channel.  Required on single-radio adapters that only support same-channel
+# STA+AP concurrency (e.g. Realtek RTL8852BE / rtw89), where NetworkManager
+# cannot run both roles because its wpa_supplicant can only own one interface.
+#
+# Usage: wifi-hotspot {up|down|restart|sync|status}
+#
+set -euo pipefail
+
+# ---- defaults (override in /etc/wifi-hotspot.conf) -------------------------
+CLIENT="wlan0"
+AP="ap0"
+SSID="ArchHotspot"
+COUNTRY="KE"
+AP_ADDR="10.42.0.1"
+AP_PREFIX="24"
+DHCP_RANGE="10.42.0.10,10.42.0.200,12h"
+RUN_DIR="/run"
+[ -r /etc/wifi-hotspot.conf ] && . /etc/wifi-hotspot.conf
+
+CONF="/etc/hostapd/${AP}.conf"
+PSKFILE="/etc/hostapd/${AP}.psk"
+DPID="${RUN_DIR}/dnsmasq-${AP}.pid"
+HPID="${RUN_DIR}/hostapd-${AP}.pid"
+
+log(){ printf '[wifi-hotspot] %s\n' "$*" >&2; }
+die(){ log "ERROR: $*"; exit 1; }
+as_root(){ [ "$(id -u)" -eq 0 ] || exec pkexec --disable-internal-agent "$0" "$@"; }
+
+# ---- helpers ---------------------------------------------------------------
+client_freq(){ iw dev "$CLIENT" link 2>/dev/null | awk '/freq:/{printf "%d\n", $2; exit}'; }
+iface_chan(){ iw dev "$1" info 2>/dev/null | awk '/channel/{print $2; exit}'; }
+is_running(){
+  [ -f "$HPID" ] && kill -0 "$(cat "$HPID")" 2>/dev/null && return 0
+  pgrep -f "hostapd.*${CONF}" >/dev/null 2>&1
+}
+
+chan_band(){ # $1 = freq in MHz -> sets HW and CH
+  local f="$1"
+  if   [ "$f" -lt 2500 ]; then HW=g; CH=$(( (f - 2407) / 5 ))
+  elif [ "$f" -lt 5950 ]; then HW=a; CH=$(( (f - 5000) / 5 ))
+  else                         HW=a; CH=$(( (f - 5950) / 5 )); fi
+}
+
+gen_mac(){ # locally-administered MAC derived from CLIENT's MAC
+  local m o1 o2 o3 o4 o5 o6
+  m=$(cat "/sys/class/net/${CLIENT}/address")
+  IFS=':' read -r o1 o2 o3 o4 o5 o6 <<<"$m"
+  printf '%02x:%s:%s:%s:%s:%02x' \
+    $(( 0x$o1 | 0x02 )) "$o2" "$o3" "$o4" "$o5" $(( (0x$o6 + 1) & 0xff ))
+}
+
+get_psk(){
+  [ -s "$PSKFILE" ] && { cat "$PSKFILE"; return; }
+  local p=""
+  p=$(nmcli -s -g 802-11-wireless-security.psk connection show "$SSID" 2>/dev/null || true)
+  [ -n "$p" ] || p=$(nmcli -s -g 802-11-wireless-security.psk connection show Hotspot 2>/dev/null || true)
+  [ -n "$p" ] || p=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-12)
+  install -m 600 /dev/null "$PSKFILE"
+  printf '%s' "$p" >"$PSKFILE"
+  printf '%s' "$p"
+}
+
+write_conf(){
+  local psk; psk=$(get_psk)
+  {
+    printf 'interface=%s\n'      "$AP"
+    printf 'driver=nl80211\n'
+    printf 'ssid=%s\n'           "$SSID"
+    printf 'hw_mode=%s\n'        "$HW"
+    printf 'channel=%s\n'        "$CH"
+    printf 'ieee80211n=1\n'
+    printf 'wmm_enabled=1\n'
+    printf 'country_code=%s\n'   "$COUNTRY"
+    printf 'auth_algs=1\n'
+    printf 'ignore_broadcast_ssid=0\n'
+    printf 'wpa=2\n'
+    printf 'wpa_passphrase=%s\n' "$psk"
+    printf 'wpa_key_mgmt=WPA-PSK\n'
+    printf 'rsn_pairwise=CCMP\n'
+    if [ "$HW" = a ]; then
+      printf 'ieee80211ac=1\n'
+      printf 'ieee80211h=1\n'
+    fi
+  } >"$CONF"
+  chmod 600 "$CONF"
+}
+
+ensure_net(){
+  ip addr replace "${AP_ADDR}/${AP_PREFIX}" dev "$AP"
+  sysctl -qw net.ipv4.ip_forward=1
+  iptables -t nat -C POSTROUTING -o "$CLIENT" -j MASQUERADE 2>/dev/null || \
+    iptables -t nat -A POSTROUTING -o "$CLIENT" -j MASQUERADE
+  iptables -C FORWARD -i "$AP" -o "$CLIENT" -j ACCEPT 2>/dev/null || \
+    iptables -A FORWARD -i "$AP" -o "$CLIENT" -j ACCEPT
+  iptables -C FORWARD -i "$CLIENT" -o "$AP" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+    iptables -A FORWARD -i "$CLIENT" -o "$AP" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  if [ -f "$DPID" ] && kill -0 "$(cat "$DPID")" 2>/dev/null; then
+    :
+  else
+    dnsmasq --interface="$AP" --bind-interfaces \
+      --dhcp-range="$DHCP_RANGE" \
+      --dhcp-option=3,"$AP_ADDR" --dhcp-option=6,"$AP_ADDR" \
+      --pid-file="$DPID" --conf-file=/dev/null
+  fi
+}
+
+stop_services(){
+  if [ -f "$HPID" ] && kill -0 "$(cat "$HPID")" 2>/dev/null; then
+    kill "$(cat "$HPID")" 2>/dev/null || true
+  fi
+  pkill -f "hostapd.*${CONF}" 2>/dev/null || true
+  rm -f "$HPID" 2>/dev/null || true
+  if [ -f "$DPID" ] && kill -0 "$(cat "$DPID")" 2>/dev/null; then
+    kill "$(cat "$DPID")" 2>/dev/null || true
+  fi
+  rm -f "$DPID" 2>/dev/null || true
+  iptables -t nat -D POSTROUTING -o "$CLIENT" -j MASQUERADE 2>/dev/null || true
+  iptables -D FORWARD -i "$AP" -o "$CLIENT" -j ACCEPT 2>/dev/null || true
+  iptables -D FORWARD -i "$CLIENT" -o "$AP" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+}
+
+# ---- commands --------------------------------------------------------------
+cmd_up(){
+  command -v hostapd >/dev/null || die "hostapd is not installed"
+  command -v dnsmasq >/dev/null || die "dnsmasq is not installed"
+
+  local freq; freq=$(client_freq || true)
+  [ -n "${freq:-}" ] || die "client '${CLIENT}' is not connected to Wi-Fi; AP channel unknown"
+  chan_band "$freq"
+  log "uplink ${freq} MHz -> AP ${AP} on channel ${CH} (hw_mode=${HW})"
+
+  if is_running && [ "$(iface_chan "$AP" || true)" = "$CH" ]; then
+    log "hotspot already running on channel ${CH}"
+    ensure_net
+    return 0
+  fi
+
+  stop_services
+  if [ ! -e "/sys/class/net/${AP}" ]; then
+    local phy; phy="phy$(iw dev "$CLIENT" info | awk '/wiphy/{print $2; exit}')"
+    iw phy "$phy" interface add "$AP" type __ap
+  fi
+  nmcli device set "$AP" managed no >/dev/null 2>&1 || true
+  ip link set dev "$AP" down 2>/dev/null || true
+  iw dev "$AP" set type __ap 2>/dev/null || true
+  ip link set dev "$AP" address "$(gen_mac)"   # avoids ENOTUNIQ (duplicate MAC)
+  ip link set dev "$AP" up
+
+  write_conf
+  hostapd -B -P "$HPID" "$CONF"
+  sleep 1
+  is_running || die "hostapd failed to start (check: journalctl -u wifi-hotspot)"
+  ensure_net
+  log "hotspot '${SSID}' up on ${AP} (ch${CH}); clients get ${AP_ADDR}/24 via NAT over ${CLIENT}"
+}
+
+cmd_down(){
+  log "stopping hotspot"
+  stop_services
+  if [ -e "/sys/class/net/${AP}" ]; then
+    ip link set "$AP" down 2>/dev/null || true
+    iw dev "$AP" del 2>/dev/null || true
+  fi
+}
+
+cmd_sync(){
+  local freq; freq=$(client_freq || true)
+  if [ -z "${freq:-}" ]; then
+    log "client '${CLIENT}' not connected; leaving hotspot as-is"
+    return 0
+  fi
+  chan_band "$freq"
+  local have; have=$(iface_chan "$AP" || true)
+  if ! is_running || [ "$have" != "$CH" ]; then
+    log "sync: hotspot channel ${have:-none} -> ${CH}"
+    cmd_down
+    cmd_up
+  fi
+}
+
+cmd_status(){
+  printf 'client %-6s: ' "$CLIENT"; iw dev "$CLIENT" link 2>/dev/null | awk '/SSID|freq/{printf "%s ",$0} END{print ""}'
+  printf 'ap     %-6s: ' "$AP";     iw dev "$AP" info 2>/dev/null | awk '/type|channel/{printf "%s ",$0} END{print ""}'
+  printf 'hostapd      : '; if is_running; then echo running; else echo stopped; fi
+  printf 'dnsmasq      : '; if { [ -f "$DPID" ] && kill -0 "$(cat "$DPID")" 2>/dev/null; } || pgrep -f "dnsmasq.*--interface=${AP}" >/dev/null 2>&1; then echo running; else echo stopped; fi
+  printf 'nat          : '; if iptables -t nat -S POSTROUTING 2>/dev/null | grep -q -- "-o ${CLIENT} -j MASQUERADE"; then echo present; elif [ "$(id -u)" -ne 0 ]; then echo "? (need root)"; else echo absent; fi
+}
+
+usage(){ printf 'Usage: wifi-hotspot {up|down|restart|sync|status}\n' >&2; }
+
+cmd="${1:-status}"
+case "$cmd" in up|down|restart|sync) as_root "$@" ;; esac
+case "$cmd" in
+  up)      cmd_up ;;
+  down)    cmd_down ;;
+  restart) cmd_down; cmd_up ;;
+  sync)    cmd_sync ;;
+  status)  cmd_status ;;
+  *)       usage; exit 1 ;;
+esac
