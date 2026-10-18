@@ -1,11 +1,21 @@
 #!/usr/bin/env bash
 #
-# wifi-hotspot - share the Wi-Fi *client* uplink as an access point on the SAME
-# channel.  Required on single-radio adapters that only support same-channel
-# STA+AP concurrency (e.g. Realtek RTL8852BE / rtw89), where NetworkManager
-# cannot run both roles because its wpa_supplicant can only own one interface.
+# wifi-hotspot - share the Wi-Fi *client* uplink as an access point (hotspot).
 #
-# Usage: wifi-hotspot {up|down|restart|sync|status}
+# Two ways to run the hotspot:
+#
+#   same  hostapd on a second virtual interface (ap0), pinned to the same
+#         channel the client connection uses.  This is what single-radio cards
+#         that only support same-channel STA+AP concurrency need (Realtek
+#         RTL8852BE/rtw89 and most others), and it uses the radio at full speed.
+#
+#   p2p   a Wi-Fi Direct group owner, which on many cards may use a channel of
+#         its own -- the radio hops between the two.  Used automatically when
+#         the client's channel cannot host an AP (radar/DFS, "no IR", 6 GHz).
+#         This is how Windows' Mobile Hotspot works.
+#
+# Usage: wifi-hotspot {up|down|restart|sync|status|detect}
+#        wifi-hotspot up [--mode auto|same|p2p]
 #
 set -euo pipefail
 
@@ -18,16 +28,26 @@ AP_ADDR="10.42.0.1"
 AP_PREFIX="24"
 DHCP_RANGE="10.42.0.10,10.42.0.200,12h"
 RUN_DIR="/run"
+MODE="auto"                 # auto | same | p2p
+P2P_BAND="bg"               # band for the Wi-Fi Direct group's own channel: bg | a
+P2P_CHANNEL="auto"          # channel number for the group, or auto
+WPA_CTRL_DIR="/run/wpa_supplicant"
 SELF="$(readlink -f -- "$0")"
 HW=g; CH=0; DFS=0
-MANAGE_FIREWALL=1          # set to 0 to leave the host firewall untouched
-NFT_TAG="wifi-hotspot"     # comment tag on the nftables rules we add
+MANAGE_FIREWALL=1           # set to 0 to leave the host firewall untouched
+NFT_TAG="wifi-hotspot"      # comment tag on the nftables rules we add
 [ -r /etc/wifi-hotspot.conf ] && . /etc/wifi-hotspot.conf
 
 CONF="/etc/hostapd/${AP}.conf"
 PSKFILE="/etc/hostapd/${AP}.psk"
 DPID="${RUN_DIR}/dnsmasq-${AP}.pid"
 HPID="${RUN_DIR}/hostapd-${AP}.pid"
+STATE="${RUN_DIR}/wifi-hotspot-${AP}.state"
+AP_IF="$AP"                 # interface serving the hotspot right now (runtime)
+P2P_DEV="p2p-dev-${CLIENT}" # wpa_supplicant's P2P device for the client iface
+CAN_HOST=0; HAVE_DFS=0      # whether the client's channel can host an AP
+CAP_APSTA=0; CAP_APSTA_CH=0; CAP_P2PGO=0; CAP_P2P_CH=0
+MODE_CHOSEN=same; P2P_FREQ=0
 
 log(){ printf '[wifi-hotspot] %s\n' "$*" >&2; }
 die(){ log "ERROR: $*"; exit 1; }
@@ -44,12 +64,192 @@ as_root(){
   exec "$elev" "$SELF" "$@"
 }
 
-# ---- helpers ---------------------------------------------------------------
+# ---- reading the radio's capabilities --------------------------------------
+# ``iw phy <phy> info`` is parsed for three things:
+#   * which interface combinations exist (can an AP/go co-exist with a client?),
+#   * which channels a network may be *started* on,
+#   * what the client is tuned to right now.
+client_phy(){ iw dev "$CLIENT" info 2>/dev/null | awk '/wiphy/{print "phy"$2; exit}'; }
+iw_phy_info(){ iw phy "$(client_phy)" info 2>/dev/null; }
+
+# For each "valid interface combination": APSTA P2PGO CHANNELS TOTAL
+# APSTA/P2PGO are 1 when that type can exist *together with* a client, per the
+# group limits -- not merely because the type is listed somewhere.
+_COMBOS_AWK='
+function flush(   n, i, j, s, g, limit, types, t, arr, tot, ch, ok_ap, ok_go) {
+  if (buf == "") return
+  s = buf
+  n = 0
+  split("", gmemb)
+  while (match(s, /#\{[^}]*\}[[:space:]]*<=[[:space:]]*[0-9]+/)) {
+    g = substr(s, RSTART, RLENGTH)
+    s = substr(s, RSTART + RLENGTH)
+    types = g; sub(/^#\{/, "", types); sub(/\}.*$/, "", types)
+    limit = g; sub(/.*<=/, "", limit); gsub(/[[:space:]]/, "", limit)
+    n++
+    gl[n] = limit + 0
+    split(types, arr, ",")
+    for (i in arr) {
+      t = arr[i]; gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
+      if (t != "") gmemb[n "," t] = 1
+    }
+  }
+  if (n == 0) { buf = ""; return }
+  tot = 1
+  if (match(buf, /total[[:space:]]*<=[[:space:]]*[0-9]+/)) {
+    t = substr(buf, RSTART, RLENGTH); sub(/.*<=/, "", t); gsub(/[[:space:]]/, "", t); tot = t + 0
+  }
+  ch = 1
+  if (match(buf, /#channels[[:space:]]*<=[[:space:]]*[0-9]+/)) {
+    t = substr(buf, RSTART, RLENGTH); sub(/.*<=/, "", t); gsub(/[[:space:]]/, "", t); ch = t + 0
+  }
+  ok_ap = (tot >= 2 && coexist("managed", "AP", n)) ? 1 : 0
+  ok_go = (tot >= 2 && coexist("managed", "P2P-GO", n)) ? 1 : 0
+  printf "%d %d %d %d\n", ok_ap, ok_go, ch, tot
+  buf = ""
+}
+function coexist(a, b, n,   i, j) {
+  for (i = 1; i <= n; i++) {
+    if (!((i "," a) in gmemb)) continue
+    for (j = 1; j <= n; j++) {
+      if (!((j "," b) in gmemb)) continue
+      if (i != j || gl[i] >= 2) return 1
+    }
+  }
+  return 0
+}
+/valid interface combinations/ { incombo = 1; next }
+incombo {
+  s = $0; sub(/^[[:space:]]+/, "", s)
+  if (s ~ /^\*[[:space:]]*#\{/) { flush(); buf = s; next }
+  if (buf != "" && (s ~ /^(total|#)/ || buf ~ /,[[:space:]]*$/)) { buf = buf " " s; next }
+  flush(); incombo = 0
+}
+END { if (incombo) flush() }
+'
+combos(){ iw_phy_info | awk "$_COMBOS_AWK"; }
+
+# Channels a network may be started on, as ranges: BAND FIRST-LAST FLAG
+_RANGES_AWK='
+function band(f) { return (f < 2500) ? "bg" : ((f < 5925) ? "a" : "6g") }
+function chnum(f) {
+  if (band(f) == "bg") return (f == 2484) ? 14 : int((f - 2407) / 5)
+  if (band(f) == "a")  return int((f - 5000) / 5)
+  return int((f - 5950) / 5)
+}
+{
+  if (!match($0, /^[[:space:]]*\*[[:space:]]*[0-9]+(\.[0-9]+)?[[:space:]]*MHz/)) next
+  line = $0
+  freq = substr(line, RSTART, RLENGTH)
+  gsub(/[^0-9.]/, "", freq)
+  rest = substr(line, RSTART + RLENGTH)
+  if (rest ~ /disabled/ || rest ~ /no IR/) next
+  flag = (rest ~ /radar detection/) ? "DFS" : "-"
+  list[++n] = band(freq) " " chnum(freq) " " flag
+}
+END {
+  for (i = 1; i <= n; i++) {
+    split(list[i], p, " ")
+    if (pband == "" || p[1] != pband || p[3] != pflag || (p[2] - plast) > 8) {
+      if (pband != "") printf "%s %s-%s %s\n", pband, pfirst, plast, pflag
+      pband = p[1]; pfirst = p[2]; plast = p[2]; pflag = p[3]
+    } else {
+      plast = p[2]
+    }
+  }
+  if (pband != "") printf "%s %s-%s %s\n", pband, pfirst, plast, pflag
+}
+'
+
+# Flags iw prints for a frequency, e.g. "(17.0 dBm) (radar detection)".
+_FREQFLAGS_AWK='
+match($0, /^[[:space:]]*\*[[:space:]]*[0-9]+(\.[0-9]+)?[[:space:]]*MHz/) {
+  line = $0
+  freq = substr(line, RSTART, RLENGTH); gsub(/[^0-9.]/, "", freq)
+  if (freq + 0 != want + 0) next
+  rest = substr(line, RSTART + RLENGTH)
+  print rest
+  exit
+}
+'
+freq_flags(){ iw_phy_info | awk -v want="$1" "$_FREQFLAGS_AWK"; }
+
+# Fill CAP_* from the interface combinations.
+probe_caps(){
+  local ap go ch _tot
+  CAP_APSTA=0; CAP_APSTA_CH=0; CAP_P2PGO=0; CAP_P2P_CH=0
+  while read -r ap go ch _tot; do
+    if [ -z "${ap:-}" ]; then continue; fi
+    if [ "$ap" = 1 ]; then
+      CAP_APSTA=1
+      if [ "${ch:-1}" -gt "$CAP_APSTA_CH" ]; then CAP_APSTA_CH=$ch; fi
+    fi
+    if [ "$go" = 1 ] && [ "${ch:-1}" -ge 2 ]; then
+      CAP_P2PGO=1
+      if [ "$ch" -gt "$CAP_P2P_CH" ]; then CAP_P2P_CH=$ch; fi
+    fi
+  done < <(combos || true)
+}
+
+# Can a network be started on this frequency?  Sets HAVE_DFS.  6 GHz never can.
+can_host_freq(){
+  HAVE_DFS=0
+  local f="$1" flags
+  [ "$f" -lt 5925 ] || return 1
+  flags=$(freq_flags "$f")
+  [ -n "$flags" ] || return 1
+  case "$flags" in *disabled*|*"no IR"*) return 1 ;; esac
+  case "$flags" in *"radar detection"*) HAVE_DFS=1 ;; esac
+  return 0
+}
+
+# ---- channel helpers -------------------------------------------------------
 client_freq(){ iw dev "$CLIENT" link 2>/dev/null | awk '/freq:/{printf "%d\n", $2; exit}'; }
 iface_chan(){ iw dev "$1" info 2>/dev/null | awk '/channel/{print $2; exit}'; }
+iface_ssid(){ iw dev "$1" info 2>/dev/null | awk '/^[[:space:]]*ssid /{print $2; exit}'; }
+go_ifaces(){ iw dev 2>/dev/null | awk '/^[ \t]*Interface /{n=$2} /^[ \t]*type /{if ($2=="P2P-GO") print n}'; }
 is_running(){
-  [ -f "$HPID" ] && kill -0 "$(cat "$HPID")" 2>/dev/null && return 0
+  if [ -f "$HPID" ] && kill -0 "$(cat "$HPID")" 2>/dev/null; then return 0; fi
   pgrep -f "hostapd.*${CONF}" >/dev/null 2>&1
+}
+
+freq_chan(){
+  local f="$1"
+  if [ "$f" -lt 2500 ]; then
+    if [ "$f" = 2484 ]; then echo 14; else echo $(( (f - 2407) / 5 )); fi
+  elif [ "$f" -lt 5925 ]; then
+    echo $(( (f - 5000) / 5 ))
+  else
+    echo $(( (f - 5950) / 5 ))
+  fi
+}
+chan_label(){ printf '%s (%s MHz)' "$(freq_chan "$1")" "$1"; }
+chan_band(){ # $1 = freq in MHz -> sets HW, CH and DFS
+  local f="$1"
+  DFS=0
+  if [ "$f" -lt 2500 ]; then
+    HW=g; CH=$(( (f - 2407) / 5 ))
+    if [ "$f" = 2484 ]; then CH=14; fi
+  elif [ "$f" -lt 5925 ]; then
+    HW=a; CH=$(( (f - 5000) / 5 ))
+    # 5 GHz DFS: UNII-2A 5260-5320 (ch 52-64), UNII-2C 5500-5720 (ch 100-144)
+    if { [ "$f" -ge 5260 ] && [ "$f" -le 5320 ]; } || \
+       { [ "$f" -ge 5500 ] && [ "$f" -le 5720 ]; }; then DFS=1; fi
+  else
+    HW=a; CH=$(( (f - 5950) / 5 ))
+    if [ "$CH" -lt 1 ]; then CH=1; fi
+  fi
+}
+host_ranges(){
+  local band range flag b parts=() p out=""
+  while read -r band range flag; do
+    case "$band" in bg) b="2.4 GHz" ;; a) b="5 GHz" ;; 6g) b="6 GHz" ;; *) b="$band" ;; esac
+    p="$b $range"
+    if [ "$flag" = DFS ]; then p="$p (DFS)"; fi
+    parts+=("$p")
+  done < <(iw_phy_info | awk "$_RANGES_AWK")
+  for p in "${parts[@]}"; do out="${out:+$out, }$p"; done
+  printf '%s' "$out"
 }
 
 # ---- firewall --------------------------------------------------------------
@@ -84,39 +284,32 @@ ensure_fw(){
   if command -v iptables >/dev/null 2>&1; then
     iptables -t nat -C POSTROUTING -o "$CLIENT" -j MASQUERADE 2>/dev/null || \
       iptables -t nat -A POSTROUTING -o "$CLIENT" -j MASQUERADE
-    iptables -C FORWARD -i "$AP" -o "$CLIENT" -j ACCEPT 2>/dev/null || \
-      iptables -A FORWARD -i "$AP" -o "$CLIENT" -j ACCEPT
-    iptables -C FORWARD -i "$CLIENT" -o "$AP" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
-      iptables -A FORWARD -i "$CLIENT" -o "$AP" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+    iptables -C FORWARD -i "$AP_IF" -o "$CLIENT" -j ACCEPT 2>/dev/null || \
+      iptables -A FORWARD -i "$AP_IF" -o "$CLIENT" -j ACCEPT
+    iptables -C FORWARD -i "$CLIENT" -o "$AP_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+      iptables -A FORWARD -i "$CLIENT" -o "$AP_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
   fi
   # nftables: also accept AP traffic in the native base chains.
   if nft_ok; then
-    nft_rule_add INPUT   iifname "$AP"
-    nft_rule_add forward iifname "$AP"
-    nft_rule_add forward oifname "$AP"
-    nft_rule_add FORWARD iifname "$AP"
-    nft_rule_add FORWARD oifname "$AP"
+    nft_rule_add INPUT   iifname "$AP_IF"
+    nft_rule_add forward iifname "$AP_IF"
+    nft_rule_add forward oifname "$AP_IF"
+    nft_rule_add FORWARD iifname "$AP_IF"
+    nft_rule_add FORWARD oifname "$AP_IF"
   fi
 }
 remove_fw(){
   iptables -t nat -D POSTROUTING -o "$CLIENT" -j MASQUERADE 2>/dev/null || true
-  iptables -D FORWARD -i "$AP" -o "$CLIENT" -j ACCEPT 2>/dev/null || true
-  iptables -D FORWARD -i "$CLIENT" -o "$AP" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+  iptables -D FORWARD -i "$AP_IF" -o "$CLIENT" -j ACCEPT 2>/dev/null || true
+  iptables -D FORWARD -i "$CLIENT" -o "$AP_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
   nft_rules_del
 }
 
-chan_band(){ # $1 = freq in MHz -> sets HW, CH and DFS
-  local f="$1"
-  DFS=0
-  if   [ "$f" -lt 2500 ]; then HW=g; CH=$(( (f - 2407) / 5 ))
-  elif [ "$f" -lt 5925 ]; then
-    HW=a; CH=$(( (f - 5000) / 5 ))
-    # 5 GHz DFS: UNII-2A 5260-5320 (ch 52-64), UNII-2C 5500-5720 (ch 100-144)
-    if { [ "$f" -ge 5260 ] && [ "$f" -le 5320 ]; } || \
-       { [ "$f" -ge 5500 ] && [ "$f" -le 5720 ]; }; then DFS=1; fi
-  else                         HW=a; CH=$(( (f - 5950) / 5 )); [ "$CH" -lt 1 ] && CH=1; fi
-}
+# ---- state -----------------------------------------------------------------
+save_state(){ { for kv in "$@"; do printf '%s\n' "$kv"; done; } > "$STATE"; chmod 600 "$STATE" 2>/dev/null || true; }
+state_get(){ [ -r "$STATE" ] || return 1; awk -F= -v k="$1" '$1==k{sub(/^[^=]*=/,"");print;exit}' "$STATE"; }
 
+# ---- passphrase ------------------------------------------------------------
 gen_mac(){ # locally-administered MAC derived from CLIENT's MAC
   local m o1 o2 o3 o4 o5 o6
   m=$(cat "/sys/class/net/${CLIENT}/address")
@@ -124,7 +317,6 @@ gen_mac(){ # locally-administered MAC derived from CLIENT's MAC
   printf '%02x:%s:%s:%s:%s:%02x' \
     $(( 0x$o1 | 0x02 )) "$o2" "$o3" "$o4" "$o5" $(( (0x$o6 + 1) & 0xff ))
 }
-
 get_psk(){
   [ -s "$PSKFILE" ] && { cat "$PSKFILE"; return; }
   local p=""
@@ -135,7 +327,9 @@ get_psk(){
   printf '%s' "$p" >"$PSKFILE"
   printf '%s' "$p"
 }
+hex_of(){ printf '%s' "$1" | od -An -tx1 | tr -d ' \n'; }
 
+# ---- hostapd mode (same channel) -------------------------------------------
 write_conf(){
   local psk; psk=$(get_psk)
   {
@@ -168,12 +362,12 @@ write_conf(){
 }
 
 ensure_net(){
-  ip addr replace "${AP_ADDR}/${AP_PREFIX}" dev "$AP"
+  ip addr replace "${AP_ADDR}/${AP_PREFIX}" dev "$AP_IF"
   ensure_fw
   if [ -f "$DPID" ] && kill -0 "$(cat "$DPID")" 2>/dev/null; then
     :
   else
-    dnsmasq --interface="$AP" --bind-interfaces \
+    dnsmasq --interface="$AP_IF" --bind-interfaces \
       --dhcp-range="$DHCP_RANGE" \
       --dhcp-option=3,"$AP_ADDR" --dhcp-option=6,"$AP_ADDR" \
       --dhcp-authoritative \
@@ -195,26 +389,19 @@ stop_services(){
   remove_fw
 }
 
-# ---- commands --------------------------------------------------------------
-cmd_up(){
+up_same(){
   command -v hostapd >/dev/null || die "hostapd is not installed"
-  command -v dnsmasq >/dev/null || die "dnsmasq is not installed"
-
-  local freq; freq=$(client_freq || true)
-  [ -n "${freq:-}" ] || die "client '${CLIENT}' is not connected to Wi-Fi; AP channel unknown"
-  chan_band "$freq"
-  log "uplink ${freq} MHz -> AP ${AP} on channel ${CH} (hw_mode=${HW}, dfs=${DFS})"
-
+  AP_IF="$AP"
   if is_running && [ "$(iface_chan "$AP" || true)" = "$CH" ]; then
     log "hotspot already running on channel ${CH}"
+    save_state "MODE=same" "AP_IF=$AP"
     ensure_net
     return 0
   fi
-
-  stop_services
+  remove_existing
+  AP_IF="$AP"
   if [ ! -e "/sys/class/net/${AP}" ]; then
-    local phy; phy="phy$(iw dev "$CLIENT" info | awk '/wiphy/{print $2; exit}')"
-    iw phy "$phy" interface add "$AP" type __ap
+    iw phy "$(client_phy)" interface add "$AP" type __ap
   fi
   nmcli device set "$AP" managed no >/dev/null 2>&1 || true
   ip link set dev "$AP" down 2>/dev/null || true
@@ -226,27 +413,232 @@ cmd_up(){
   hostapd -B -P "$HPID" "$CONF"
   sleep 1
   is_running || die "hostapd failed to start (check: journalctl -u wifi-hotspot)"
+  save_state "MODE=same" "AP_IF=$AP"
   ensure_net
   log "hotspot '${SSID}' up on ${AP} (ch${CH}); clients get ${AP_ADDR}/24 via NAT over ${CLIENT}"
 }
 
-cmd_down(){
-  log "stopping hotspot"
-  stop_services
-  if [ -e "/sys/class/net/${AP}" ]; then
-    ip link set "$AP" down 2>/dev/null || true
-    iw dev "$AP" del 2>/dev/null || true
+# ---- Wi-Fi Direct (P2P-GO) mode --------------------------------------------
+# The group is started by the wpa_supplicant NetworkManager already runs, which
+# creates a ``p2p-<client>-N`` interface of type P2P-GO that can sit on a
+# channel of its own.  We only add addressing, DHCP and NAT to it.
+p2p_socket_state(){
+  local out
+  out=$(wpa_cli -p "$WPA_CTRL_DIR" -i "$P2P_DEV" ping 2>&1 || true)
+  case "$out" in
+    *PONG*)                 echo ok ;;
+    *"Permission denied"*)  echo denied ;;
+    *"No such file"*|*"No such device"*|*"Failed to connect"*) echo absent ;;
+    *)                      echo unknown ;;
+  esac
+}
+p2p_ready(){ # usable to bring the group up (socket exists and wpa_cli is present)
+  command -v wpa_cli >/dev/null 2>&1 || return 1
+  case "$(p2p_socket_state)" in ok|denied) return 0 ;; *) return 1 ;; esac
+}
+wpa_out(){ wpa_cli -p "$WPA_CTRL_DIR" -i "$P2P_DEV" "$@" 2>&1 || true; }
+wpa_ok(){ [ "$(wpa_out "$@" | tr -d '\r\n')" = OK ]; }
+wpa_set(){ # $1 = network id, $2 = passphrase
+  local id="$1" psk="$2"
+  wpa_ok set_network "$id" ssid "$(hex_of "$SSID")"   || return 1
+  # NB: the passphrase is an argument to wpa_cli, so it is briefly visible in
+  # the process list; there is no way to hand it to wpa_cli otherwise.
+  wpa_ok set_network "$id" psk "\"$psk\""             || return 1
+  wpa_ok set_network "$id" key_mgmt WPA-PSK           || return 1
+  wpa_ok set_network "$id" proto RSN                  || return 1
+  wpa_ok set_network "$id" pairwise CCMP              || return 1
+  wpa_ok set_network "$id" mode 3                     || return 1
+  wpa_ok set_network "$id" disabled 2                 || return 1
+}
+p2p_remove_new(){ # $1 = space-separated interface names that existed before
+  local before=" $1 " g
+  for g in $(go_ifaces); do
+    case "$before" in *" $g "*) continue ;; esac
+    wpa_out p2p_group_remove "$g" >/dev/null 2>&1 || true
+  done
+}
+p2p_forget(){ # $1 = network id; also drops wpa_supplicant's persistent copy
+  local id="${1:-}" got hex
+  [ -n "$id" ] || return 0
+  wpa_out remove_network "$id" >/dev/null 2>&1 || true
+  hex=$(hex_of "$SSID")
+  wpa_out list_networks 2>/dev/null | awk -F'\t' \
+      'NR>1 && $1 ~ /^[0-9]+$/ && $4 ~ /P2P-PERSISTENT/ {print $1}' \
+    | while read -r id; do
+        got=$(wpa_out get_network "$id" ssid 2>/dev/null | tr -d '"' | tr 'A-Z' 'a-z' || true)
+        if [ "$got" = "$(printf '%s' "$SSID" | tr 'A-Z' 'a-z')" ] || [ "$got" = "$hex" ]; then
+          wpa_out remove_network "$id" >/dev/null 2>&1 || true
+        fi
+      done
+}
+p2p_freq(){ # own-channel frequency for the group, in MHz
+  local f=""
+  case "$P2P_BAND" in
+    bg) f=2437 ;;
+    a)  f=5180 ;;
+    *)  die "P2P_BAND must be bg or a (got '$P2P_BAND')" ;;
+  esac
+  if [ "$P2P_CHANNEL" != auto ] && [ -n "$P2P_CHANNEL" ]; then
+    case "$P2P_BAND" in
+      bg) if [ "$P2P_CHANNEL" -ge 1 ] 2>/dev/null && [ "$P2P_CHANNEL" -le 14 ]; then
+            if [ "$P2P_CHANNEL" = 14 ]; then f=2484; else f=$(( 2407 + 5 * P2P_CHANNEL )); fi
+          else
+            log "warn: P2P_CHANNEL=$P2P_CHANNEL is not a 2.4 GHz channel; using $(chan_label "$f")"
+          fi ;;
+      a)  if [ "$P2P_CHANNEL" -ge 32 ] 2>/dev/null && [ "$P2P_CHANNEL" -le 177 ]; then
+            f=$(( 5000 + 5 * P2P_CHANNEL ))
+          else
+            log "warn: P2P_CHANNEL=$P2P_CHANNEL is not a 5 GHz channel; using $(chan_label "$f")"
+          fi ;;
+    esac
   fi
+  if ! can_host_freq "$f"; then
+    log "warn: $(chan_label "$f") cannot host a network on this card; falling back"
+    case "$P2P_BAND" in bg) f=2437 ;; a) f=5180 ;; esac
+    can_host_freq "$f" || die "no usable channel for the Wi-Fi Direct group on band '$P2P_BAND'"
+  fi
+  printf '%s' "$f"
+}
+
+wait_go_iface(){ # $1 = space-separated interface names that existed before
+  local before=" $1 " name _
+  for _ in $(seq 1 30); do
+    for name in $(go_ifaces); do
+      case "$before" in *" $name "*) continue ;; esac
+      if [ -n "$(iface_ssid "$name")" ]; then printf '%s' "$name"; return 0; fi
+    done
+    sleep 0.5
+  done
+  return 1
+}
+
+up_p2p(){
+  command -v dnsmasq >/dev/null || die "dnsmasq is not installed"
+  [ "$CAP_P2PGO" = 1 ] || die "this card's driver does not allow a Wi-Fi Direct group alongside a client connection"
+  p2p_ready || die "Wi-Fi Direct needs wpa_supplicant's P2P control socket at ${WPA_CTRL_DIR}/${P2P_DEV} (and wpa_cli)"
+  local curmode; curmode=$(state_get MODE || true)
+  if [ "${curmode:-}" = p2p ]; then
+    AP_IF=$(state_get AP_IF || true)
+    if [ -n "${AP_IF:-}" ] && [ -e "/sys/class/net/${AP_IF}" ]; then
+      log "Wi-Fi Direct hotspot already running on ${AP_IF}"
+      ensure_net
+      return 0
+    fi
+  fi
+  remove_existing
+
+  chan_band "$P2P_FREQ"
+  log "starting Wi-Fi Direct group on $(chan_label "$P2P_FREQ")"
+  local before net go psk
+  before=$(go_ifaces | tr '\n' ' ')
+  net=$(wpa_out add_network | tr -d '\r\n')
+  case "$net" in ''|*[!0-9]*) die "wpa_supplicant refused to add a network (reply: ${net:-none})" ;; esac
+  psk=$(get_psk)
+  if ! wpa_set "$net" "$psk"; then
+    p2p_forget "$net"
+    die "wpa_supplicant refused the hotspot settings"
+  fi
+  if ! wpa_ok p2p_group_add persistent="$net" freq="$P2P_FREQ"; then
+    p2p_forget "$net"
+    die "wpa_supplicant could not start the group on $(chan_label "$P2P_FREQ")"
+  fi
+  go=$(wait_go_iface "$before" || true)
+  if [ -z "${go:-}" ]; then
+    p2p_remove_new "$before"
+    p2p_forget "$net"
+    die "wpa_supplicant created no group interface; this card/driver may not support it"
+  fi
+  AP_IF="$go"
+  nmcli device set "$AP_IF" managed no >/dev/null 2>&1 || true
+  ip link set dev "$AP_IF" up 2>/dev/null || true
+  save_state "MODE=p2p" "AP_IF=$AP_IF" "P2P_NET=$net" "P2P_FREQ=$P2P_FREQ"
+  ensure_net
+  log "hotspot '${SSID}' up as a Wi-Fi Direct group on ${AP_IF} ($(chan_label "$P2P_FREQ")); clients get ${AP_ADDR}/24 via NAT over ${CLIENT}"
+}
+
+# ---- mode selection --------------------------------------------------------
+choose_mode(){
+  case "$MODE" in
+    same) MODE_CHOSEN=same ;;
+    p2p)  MODE_CHOSEN=p2p ;;
+    auto)
+      if [ "$CAN_HOST" = 1 ] && [ "$HAVE_DFS" = 0 ]; then
+        MODE_CHOSEN=same                 # the client's channel can host an AP
+      elif [ "$CAP_P2PGO" = 1 ] && p2p_ready; then
+        MODE_CHOSEN=p2p                  # it can't; give the group a channel of its own
+      else
+        MODE_CHOSEN=same                 # DFS (works, just slow) or an error in up_same
+      fi ;;
+    *) die "MODE must be auto, same or p2p (got '$MODE')" ;;
+  esac
+  if [ "$MODE_CHOSEN" = p2p ]; then P2P_FREQ=$(p2p_freq); fi
+}
+
+# ---- stopping --------------------------------------------------------------
+remove_existing(){
+  local mode apif net
+  mode=$(state_get MODE || true); apif=$(state_get AP_IF || true); net=$(state_get P2P_NET || true)
+  AP_IF="${apif:-$AP}"
+  stop_services
+  if [ "${mode:-same}" = p2p ]; then
+    local g ss
+    for g in $(go_ifaces); do
+      ss=$(iface_ssid "$g" || true)
+      if [ "$g" = "${apif:-}" ] || [ "$ss" = "$SSID" ]; then
+        wpa_out p2p_group_remove "$g" >/dev/null 2>&1 || true
+      fi
+    done
+    p2p_forget "${net:-}"
+  fi
+  if [ -e "/sys/class/net/${AP_IF}" ]; then
+    ip link set "$AP_IF" down 2>/dev/null || true
+    iw dev "$AP_IF" del 2>/dev/null || true
+  fi
+  rm -f "$STATE"
+}
+
+# ---- commands --------------------------------------------------------------
+cmd_up(){
+  local freq
+  freq=$(client_freq || true)
+  [ -n "${freq:-}" ] || die "client '${CLIENT}' is not connected to Wi-Fi; AP channel unknown"
+  chan_band "$freq"
+  if can_host_freq "$freq"; then CAN_HOST=1; else CAN_HOST=0; fi
+  probe_caps
+  [ "$CAP_APSTA" = 1 ] || die "this card's driver cannot run an access point alongside a client connection"
+  choose_mode
+  log "uplink $(chan_label "$freq") -> ${MODE_CHOSEN} mode"
+  if [ "$MODE_CHOSEN" = p2p ]; then up_p2p; else up_same; fi
+}
+
+cmd_down(){
+  local mode apif
+  mode=$(state_get MODE || true); apif=$(state_get AP_IF || true)
+  AP_IF="${apif:-$AP}"
+  log "stopping hotspot (${mode:-unknown} mode on ${AP_IF})"
+  remove_existing
 }
 
 cmd_sync(){
-  local freq; freq=$(client_freq || true)
+  local mode apif freq have
+  mode=$(state_get MODE || true)
+  if [ "$mode" = p2p ]; then
+    apif=$(state_get AP_IF || true)
+    if [ -n "${apif:-}" ] && [ -e "/sys/class/net/${apif}" ]; then
+      AP_IF="$apif"; ensure_net       # the group keeps its own channel; nothing to follow
+      return 0
+    fi
+    log "sync: Wi-Fi Direct group is gone; starting the hotspot again"
+    cmd_up
+    return 0
+  fi
+  freq=$(client_freq || true)
   if [ -z "${freq:-}" ]; then
     log "client '${CLIENT}' not connected; leaving hotspot as-is"
     return 0
   fi
   chan_band "$freq"
-  local have; have=$(iface_chan "$AP" || true)
+  have=$(iface_chan "$AP" || true)
   if ! is_running || [ "$have" != "$CH" ]; then
     log "sync: hotspot channel ${have:-none} -> ${CH}"
     cmd_down
@@ -255,22 +647,112 @@ cmd_sync(){
 }
 
 cmd_status(){
-  printf 'client %-6s: ' "$CLIENT"; iw dev "$CLIENT" link 2>/dev/null | awk '/SSID|freq/{printf "%s ",$0} END{print ""}'
-  printf 'ap     %-6s: ' "$AP";     iw dev "$AP" info 2>/dev/null | awk '/type|channel/{printf "%s ",$0} END{print ""}'
+  local mode apif
+  mode=$(state_get MODE || true); apif=$(state_get AP_IF || true)
+  [ -n "${apif:-}" ] || apif="$AP"
+  printf 'client %-6s: ' "$CLIENT"; iw dev "$CLIENT" link 2>/dev/null | awk '/SSID|freq/{printf "%s ",$0} END{print ""}' || true
+  printf 'mode         : '; if [ -n "${mode:-}" ]; then echo "${mode} (${apif})"; else echo "not running (configured: ${MODE})"; fi
+  printf 'ap     %-6s: ' "$apif"; iw dev "$apif" info 2>/dev/null | awk '/type|channel/{printf "%s ",$0} END{print ""}' || true
   printf 'hostapd      : '; if is_running; then echo running; else echo stopped; fi
-  printf 'dnsmasq      : '; if { [ -f "$DPID" ] && kill -0 "$(cat "$DPID")" 2>/dev/null; } || pgrep -f "dnsmasq.*--interface=${AP}" >/dev/null 2>&1; then echo running; else echo stopped; fi
+  printf 'dnsmasq      : '; if { [ -f "$DPID" ] && kill -0 "$(cat "$DPID")" 2>/dev/null; } || pgrep -f "dnsmasq.*--interface=${apif}" >/dev/null 2>&1; then echo running; else echo stopped; fi
   printf 'nat          : '; if iptables -t nat -S POSTROUTING 2>/dev/null | grep -q -- "-o ${CLIENT} -j MASQUERADE"; then echo present; elif [ "$(id -u)" -ne 0 ]; then echo "? (need root)"; else echo absent; fi
 }
 
-usage(){ printf 'Usage: wifi-hotspot {up|down|restart|sync|status}\n' >&2; }
+cmd_detect(){
+  local phy; phy=$(client_phy)
+  [ -n "$phy" ] || die "no Wi-Fi interface '${CLIENT}' found (set CLIENT= in /etc/wifi-hotspot.conf)"
+  iw phy "$phy" info >/dev/null 2>&1 || die "cannot read 'iw phy ${phy} info'"
+  probe_caps
+  local freq ssid driver apsta p2pgo ranges sockstate verdict
+  freq=$(client_freq || true)
+  ssid=$(iw dev "$CLIENT" link 2>/dev/null | awk '/SSID:/{sub(/^[ \t]*SSID: /,"");print;exit}' || true)
+  driver=$(basename "$(readlink -f "/sys/class/net/${CLIENT}/device/driver" 2>/dev/null || true)" 2>/dev/null || true)
+  ranges=$(host_ranges)
+
+  if [ "$CAP_APSTA" = 0 ]; then apsta="no"
+  elif [ "$CAP_APSTA_CH" -le 1 ]; then apsta="yes - same channel only"
+  else apsta="yes - up to ${CAP_APSTA_CH} channels"; fi
+  if [ "$CAP_P2PGO" = 1 ]; then p2pgo="yes - group owner may use its own channel"
+  else p2pgo="no"; fi
+
+  printf '\n  wifi-hotspot detect\n\n'
+  printf '  %-14s: %s (%s)%s\n' "interface" "$CLIENT" "$phy" "${driver:+  [$driver]}"
+  if [ -n "${freq:-}" ]; then
+    printf '  %-14s: connected to "%s" on channel %s\n' "client link" "${ssid:-?}" "$(chan_label "$freq")"
+  else
+    printf '  %-14s: not connected\n' "client link"
+  fi
+  printf '  %-14s: %s\n' "AP + client" "$apsta"
+  printf '  %-14s: %s\n' "Wi-Fi Direct" "$p2pgo"
+  printf '  %-14s: %s\n' "host channels" "${ranges:-unknown}"
+
+  if [ -n "${freq:-}" ]; then
+    chan_band "$freq"
+    if can_host_freq "$freq"; then CAN_HOST=1; else CAN_HOST=0; fi
+    if [ "$CAN_HOST" = 1 ]; then
+      printf '  %-14s: %s - can host an AP\n' "this channel" "$(chan_label "$freq")"
+    else
+      printf '  %-14s: %s - cannot host an AP\n' "this channel" "$(chan_label "$freq")"
+    fi
+    choose_mode
+  fi
+
+  printf '\n'
+  printf '  %-14s: %s\n' "hostapd" "$(command -v hostapd || echo 'not installed')"
+  printf '  %-14s: %s\n' "dnsmasq" "$(command -v dnsmasq || echo 'not installed')"
+  sockstate=$(p2p_socket_state)
+  case "$sockstate" in
+    ok)      printf '  %-14s: %s (ok)\n' "wpa_supplicant" "${WPA_CTRL_DIR}/${P2P_DEV}" ;;
+    denied)  printf '  %-14s: %s (present; root needed to confirm)\n' "wpa_supplicant" "${WPA_CTRL_DIR}/${P2P_DEV}" ;;
+    absent)  printf '  %-14s: no P2P control socket at %s (Wi-Fi Direct unavailable)\n' "wpa_supplicant" "${WPA_CTRL_DIR}/${P2P_DEV}" ;;
+    *)       printf '  %-14s: %s\n' "wpa_supplicant" "$sockstate" ;;
+  esac
+
+  printf '\n'
+  if [ -z "${freq:-}" ]; then
+    verdict='connect to Wi-Fi first; the mode is chosen when the hotspot starts'
+  elif [ "$CAP_APSTA" = 0 ]; then
+    verdict='this card cannot run an access point while connected to Wi-Fi'
+  elif [ "$CAN_HOST" = 1 ] && [ "$HAVE_DFS" = 0 ]; then
+    if [ "$MODE_CHOSEN" = same ]; then
+      verdict="ready - 'wifi-hotspot up' shares this connection on $(chan_label "$freq")"
+    else
+      verdict="ready - the hotspot will use a Wi-Fi Direct group on $(chan_label "${P2P_FREQ:-$freq}")"
+    fi
+  elif [ "$MODE_CHOSEN" = p2p ]; then
+    verdict="Wi-Fi Direct: the group gets channel $(chan_label "${P2P_FREQ:-$freq}") of its own while the radio stays on $(chan_label "$freq")"
+  elif [ "$CAN_HOST" = 1 ]; then
+    verdict="ready - DFS channel $(freq_chan "$freq") needs a radar check first (up to a minute)"
+  else
+    verdict="cannot host on $(chan_label "$freq") and Wi-Fi Direct is unavailable; connect to a 2.4 GHz network"
+  fi
+  printf '  %-14s: %s\n\n' "verdict" "$verdict"
+}
+
+usage(){
+  printf 'Usage: wifi-hotspot {up|down|restart|sync|status|detect}\n' >&2
+  printf '       wifi-hotspot up [--mode auto|same|p2p]\n' >&2
+}
+parse_args(){ # skip the command word; accept --mode
+  shift || true
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --mode)   MODE="${2:-}"; shift 2 ;;
+      --mode=*) MODE="${1#*=}"; shift ;;
+      *)        die "unknown option: $1" ;;
+    esac
+  done
+}
 
 cmd="${1:-status}"
 case "$cmd" in up|down|restart|sync) as_root "$@" ;; esac
 case "$cmd" in
-  up)      cmd_up ;;
+  up)      parse_args "$@"; cmd_up ;;
   down)    cmd_down ;;
-  restart) cmd_down; cmd_up ;;
-  sync)    cmd_sync ;;
+  restart) parse_args "$@"; cmd_down; cmd_up ;;
+  sync)    parse_args "$@"; cmd_sync ;;
   status)  cmd_status ;;
+  detect)  cmd_detect ;;
+  -h|--help|help) usage; exit 0 ;;
   *)       usage; exit 1 ;;
 esac

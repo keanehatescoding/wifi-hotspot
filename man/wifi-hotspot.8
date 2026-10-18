@@ -1,25 +1,22 @@
 .\" Manual page for wifi-hotspot
 .TH WIFI\-HOTSPOT 8 "2026\-10\-19" "wifi\-hotspot" "System Administration"
 .SH NAME
-wifi\-hotspot \- share a Wi\-Fi client uplink as an access point on the same channel
+wifi\-hotspot \- share a Wi\-Fi client uplink as an access point
 .SH SYNOPSIS
 .nf
-\fBwifi\-hotspot\fR { up | down | restart | sync | status }
+\fBwifi\-hotspot\fR { up | down | restart | sync | status | detect }
+\fBwifi\-hotspot up\fR [ \fB\-\-mode\fR \fIauto\fR | \fIsame\fR | \fIp2p\fR ]
 .fi
 .SH DESCRIPTION
 .B wifi\-hotspot
-runs a Wi\-Fi access point (hotspot) on a second virtual interface
-.RB ( ap0 )
-while the primary interface
+runs a Wi\-Fi access point (hotspot) while the primary interface
 .RB ( wlan0 )
 stays associated to a Wi\-Fi network as a client, and forwards the hotspot
 clients' traffic to that uplink with NAT.
 .PP
-It exists because of a hardware limitation of single\-radio adapters:
-the hotspot must run on the
-.I same channel
-as the client connection.  Such adapters advertise this same\-channel
-concurrency (SCC) through
+It exists because of a hardware limitation of single\-radio adapters: a client
+and an access point can coexist only on one channel.  Such adapters advertise
+this through
 .BR iw (8);
 for example, the Realtek RTL8852BE
 .RB ( rtw89 )
@@ -27,35 +24,73 @@ reports:
 .PP
 .nf
     * #{ managed } <= 1, #{ AP, P2P\-client, P2P\-GO } <= 1, total <= 2, #channels <= 1
+    * #{ managed } <= 1, #{ P2P\-client, P2P\-GO } <= 1,       total <= 2, #channels <= 2
 .fi
 .PP
-NetworkManager cannot drive both roles itself: activating a hotspot tears
-down the client connection, and its
+The first combination allows a client and an AP, but only on the
+.I same channel
+(same\-channel concurrency).  NetworkManager cannot drive both roles itself:
+activating a hotspot tears down the client connection, and its
 .BR wpa_supplicant (8)
-refuses to grab a second interface.  Windows instead silently puts the
-hotspot on the client's channel;
+refuses to grab a second interface.  Windows instead silently puts the hotspot
+on the client's channel, and
 .B wifi\-hotspot
 does the same thing on Linux.
 .PP
-The command creates the
+The command therefore has two ways to run the hotspot:
+.TP
+.B same
+Create the
 .B ap0
-interface, assigns it a unique locally administered MAC address, runs
+interface, assign it a unique locally administered MAC address, run
 .BR hostapd (8)
-pinned to the uplink's channel, and starts
+pinned to the uplink's channel, and start
 .BR dnsmasq (8)
-for DHCP and DNS.  It also adds the required NAT, forwarding and firewall
-rules and removes them again on
+for DHCP and DNS.  This is used whenever the uplink's channel can host an
+access point, and it uses the radio at full speed.
+.TP
+.B p2p
+When the uplink's channel cannot host an access point \- a radar/DFS channel, a
+channel marked
+.I no IR
+for initiating radiation, or 6\ GHz \- use the second combination above: ask the
+.BR wpa_supplicant (8)
+that NetworkManager already runs for a Wi\-Fi Direct group owner, which may use a
+channel of its own.  The group appears as a
+.I p2p\-wlan0\-N
+interface, which then gets the same addressing, DHCP and NAT treatment.  The
+radio hops between the two channels, so this is slower and
+.I experimental
+(see
+.BR NOTES ).
+.PP
+Which of the two is used is controlled by the
+.B MODE
+setting (see
+.BR CONFIGURATION ).
+In both cases the required NAT, forwarding and firewall rules are added and
+removed again on
 .BR down .
+.PP
+The
+.B detect
+command reports what the card, the current connection and the system support,
+and which of the two ways will be used.
 .SH COMMANDS
 .TP
 .B up
-Create or ensure the hotspot on the client's current channel.  Idempotent:
-if the hotspot is already running on the right channel this only refreshes
-the network and firewall rules.
+Create or ensure the hotspot.  With
+.BR MODE=auto
+(default) it uses
+.B same
+if the client's current channel can host an access point, otherwise
+.BR p2p ;
+the decision is logged.  Idempotent: if the hotspot is already up in the
+required mode this only refreshes the network and firewall rules.
 .TP
 .B down
-Tear the hotspot down: stop hostapd and dnsmasq, remove the firewall and
-NAT rules and delete the
+Tear the hotspot down: stop hostapd and dnsmasq, remove the Wi\-Fi Direct group
+(if one is up), delete the firewall and NAT rules and delete the
 .B ap0
 interface.  The client connection is left untouched.
 .TP
@@ -64,31 +99,60 @@ Equivalent to
 .B down
 followed by
 .BR up .
-Use after editing
-.I /etc/wifi\-hotspot.conf
-or the hotspot password.
+Use after changing the mode, SSID or password.
 .TP
 .B sync
-Re\-pin the hotspot to the client's current channel.  Does nothing if the
-client is disconnected or the channel already matches.  This is what the
-NetworkManager dispatcher calls on reconnect and roaming.
+Re\-pin the hotspot to the client's current channel.  In
+.B same
+mode it does nothing if the client is disconnected or the channel already
+matches; in
+.B p2p
+mode there is nothing to follow, so it only restarts the group if it has gone
+away.  This is what the NetworkManager dispatcher calls on reconnect and
+roaming.
 .TP
 .B status
-Show the client SSID and frequency, the AP interface, and whether hostapd,
-dnsmasq and the NAT rule are up.  This is the default when no command is
-given and it does
+Show the client SSID and frequency, the mode and AP interface in use, and
+whether hostapd, dnsmasq and the NAT rule are up.  This is the default when no
+command is given and it does
 .I not
 require root.
+.TP
+.B detect
+Report what the machine can do, without changing anything and without root:
+the interface, driver and current connection; whether a client and an access
+point can coexist and on how many channels; whether a Wi\-Fi Direct group owner
+may use its own channel; which channels a network may be started on; and the
+mode that
+.B up
+will pick.  Use it to tell a bug report or a
+.B MODE
+choice apart from a hardware limit.
 .PP
 Except for
-.BR status ,
+.BR status
+and
+.BR detect ,
 the commands re\-execute themselves as root using
 .BR pkexec (1)
 (falling back to
 .BR sudo (8)),
 so they may be run by an ordinary user.
 .SH OPTIONS
-None.  Behaviour is controlled by the configuration file described below.
+.TP
+.BR \-\-mode " " \fIauto\fR | \fIsame\fR | \fIp2p\fR
+Available on
+.BR up ,
+.B restart
+and
+.BR sync .
+Override the configured
+.B MODE
+for this invocation; takes precedence over the configuration file.  Accepts
+either
+.B \-\-mode \fIvalue\fR
+or
+.BR \-\-mode= \fIvalue\fR .
 .SH CONFIGURATION
 .I /etc/wifi\-hotspot.conf
 is a shell fragment sourced by the script.  All settings are optional and
@@ -98,10 +162,14 @@ default to the values shown.  Uncomment and edit as needed.
 The Wi\-Fi client interface whose connection is shared.
 .TP
 .B AP="ap0"
-The virtual access point interface created and removed by the script.
+The virtual access point interface created and removed by the script in
+.B same
+mode.
 .TP
 .B SSID="ArchHotspot"
-The hotspot SSID.
+The hotspot SSID.  In
+.B p2p
+mode this is the name of the Wi\-Fi Direct group as well.
 .TP
 .B COUNTRY="KE"
 Two\-letter ISO 3166 country code written as
@@ -110,7 +178,7 @@ to the hostapd configuration.  Set it so the regulatory domain permits
 your AP channel.
 .TP
 .B AP_ADDR="10.42.0.1"
-IPv4 address assigned to the AP interface.
+IPv4 address assigned to the hotspot interface, in either mode.
 .TP
 .B AP_PREFIX="24"
 Prefix length of the hotspot subnet.
@@ -119,12 +187,55 @@ Prefix length of the hotspot subnet.
 dnsmasq DHCP range (first address, last address, lease time).
 .TP
 .B RUN_DIR="/run"
-Directory for pid and lease files.
+Directory for pid, lease and state files.
 .TP
 .B MANAGE_FIREWALL=1
 When 0, the script makes no firewall, forwarding or NAT changes at all.
 Set this if you manage the firewall yourself (see
 .BR FIREWALL ).
+.TP
+.B MODE="auto"
+Which way to run the hotspot:
+.RS
+.TP
+.B auto
+Use
+.B same
+when the client's channel can host an access point, otherwise
+.B p2p
+if the card and wpa_supplicant support it.  The default.
+.TP
+.B same
+Always use hostapd, pinned to the client's channel.
+.TP
+.B p2p
+Always use a Wi\-Fi Direct group owner.
+.RE
+.TP
+.B P2P_BAND="bg"
+Band for the Wi\-Fi Direct group's own channel when
+.B MODE
+resolves to
+.BR p2p :
+.B bg
+(2.4\ GHz, default channel 6) or
+.B a
+(5\ GHz, default channel 36).
+.TP
+.B P2P_CHANNEL="auto"
+Channel number for the group, or
+.B auto
+for the band's default.  It must be a channel the card may start a network on;
+otherwise the default is used with a warning.
+.TP
+.B WPA_CTRL_DIR="/run/wpa_supplicant"
+Directory holding
+.BR wpa_supplicant (8)'s
+control sockets, used only in
+.B p2p
+mode.  The group is started on
+.IR p2p\-dev\-CLIENT
+in this directory.
 .PP
 The Wi\-Fi password is read once from the NetworkManager profile named
 after
@@ -167,7 +278,8 @@ is 1,
 .B wifi\-hotspot
 additionally inserts a scoped
 .B accept
-rule for the AP interface into the existing nftables
+rule for the hotspot interface (whichever mode is in use) into the existing
+nftables
 .I ip filter
 .B INPUT
 and
@@ -189,7 +301,10 @@ Configuration file.
 .TP
 .I /etc/hostapd/ap0.conf
 Generated hostapd configuration (mode 0600), rewritten on every
-.BR up .
+.BR up
+in
+.B same
+mode.
 .TP
 .I /etc/hostapd/ap0.psk
 The hotspot passphrase (mode 0600).
@@ -203,6 +318,15 @@ dnsmasq pid file.
 .I /run/dnsmasq\-ap0.leases
 dnsmasq DHCP leases.
 .TP
+.I /run/wifi\-hotspot\-ap0.state
+Records the running mode and interface so that
+.BR down ,
+.B sync
+and
+.B status
+know what to tear down; removed by
+.BR down .
+.TP
 .I /etc/systemd/system/wifi\-hotspot.service
 Oneshot unit that brings the hotspot up at boot.
 .TP
@@ -214,10 +338,29 @@ on connect or roaming and
 on disconnect.
 .SH NOTES
 .TP
-.B Same channel is mandatory
-The AP is always pinned to the client's channel; this is a limit of the
+.B Same channel is mandatory in same mode
+The hostapd AP is always pinned to the client's channel; this is a limit of the
 radio, not of the tool.  The dispatcher does the pinning automatically
 when you roam.
+.TP
+.B Wi\-Fi Direct mode is experimental
+In
+.B p2p
+mode the group is started through the
+.BR wpa_supplicant (8)
+control socket by
+.BR wpa_cli (8).
+It requires a card/driver that permits a group owner next to a client
+connection (reported by
+.BR detect )
+and it still uses one radio, hopping between two channels, so throughput is
+lower than in
+.B same
+mode.  If it does not work,
+.B MODE=same
+is unaffected.  Note also that the passphrase is passed to
+.B wpa_cli
+as an argument, so it is briefly visible in the process list.
 .TP
 .B Throughput is roughly halved
 One radio time\-shares between the two roles, on both links.  Share an
@@ -227,7 +370,11 @@ ethernet uplink instead for full speed.
 Channels 52\-64 and 100\-144 require radar detection
 .RB ( 802.11h )
 and add a channel availability check (CAC) delay; non\-DFS 5 GHz and
-2.4 GHz channels start immediately.
+2.4 GHz channels start immediately.  Because the delay is avoidable, such a
+channel is one of the cases where
+.B MODE=auto
+prefers
+.BR p2p .
 .TP
 .B Regulatory domain
 The AP can only use channels allowed for
@@ -239,12 +386,35 @@ in the current regulatory domain.
 Success.
 .TP
 .B 1
-Failure \- for example hostapd could not start, the client is not
-connected, or a required program is missing.  Diagnostic messages are
-printed to standard error and, when running under systemd,
+Failure \- for example hostapd could not start, the Wi\-Fi Direct group could
+not be created, the client is not connected, or a required program is missing.
+Diagnostic messages are printed to standard error and, when running under
+systemd,
 .B wifi\-hotspot.service
 is logged to the journal.
 .SH EXAMPLES
+Ask what the machine can do:
+.PP
+.nf
+.RS
+$ wifi\-hotspot detect
+
+  wifi\-hotspot detect
+
+  interface     : wlan0 (phy0)  [rtw89_8852be]
+  client link   : connected to "MyNet" on channel 36 (5180 MHz)
+  AP + client   : yes \- same channel only
+  Wi\-Fi Direct  : yes \- group owner may use its own channel
+  host channels : 2.4 GHz 1\-13, 5 GHz 36\-48
+
+  hostapd       : /usr/bin/hostapd
+  dnsmasq       : /usr/bin/dnsmasq
+  wpa_supplicant: /run/wpa_supplicant/p2p\-dev\-wlan0 (present; root needed)
+
+  verdict       : ready \- 'wifi\-hotspot up' shares this connection on 36 (5180 MHz)
+.RE
+.fi
+.PP
 Bring the hotspot up and check it:
 .PP
 .nf
@@ -252,6 +422,7 @@ Bring the hotspot up and check it:
 # wifi\-hotspot up
 $ wifi\-hotspot status
 client wlan0 :  SSID: MyNet  freq: 5180.0
+mode         : same (ap0)
 ap     ap0   :  type AP  channel 36 (5180 MHz)
 hostapd      : running
 dnsmasq      : running
@@ -259,12 +430,11 @@ nat          : ? (need root)
 .RE
 .fi
 .PP
-Re\-create the hotspot after changing the SSID or password, then tear it
-down:
+Force the experimental mode, then tear the hotspot down:
 .PP
 .nf
 .RS
-# wifi\-hotspot restart
+# wifi\-hotspot up \-\-mode p2p
 # wifi\-hotspot down
 .RE
 .fi
@@ -272,6 +442,8 @@ down:
 .BR hostapd (8),
 .BR dnsmasq (8),
 .BR iw (8),
+.BR wpa_supplicant (8),
+.BR wpa_cli (8),
 .BR nmcli (1),
 .BR pkexec (1),
 .BR iptables (8),

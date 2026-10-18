@@ -1,4 +1,5 @@
-# wifi-hotspot - install a same-channel Wi-Fi hotspot sharing the client uplink.
+# wifi-hotspot - install a Wi-Fi hotspot that shares the client uplink
+# (same-channel hostapd, or a Wi-Fi Direct group owner on its own channel).
 
 PREFIX      ?= /usr/local
 SYSCONFDIR  ?= /etc
