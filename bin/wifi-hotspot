@@ -46,7 +46,7 @@ STATE="${RUN_DIR}/wifi-hotspot-${AP}.state"
 AP_IF="$AP"                 # interface serving the hotspot right now (runtime)
 P2P_DEV="p2p-dev-${CLIENT}" # wpa_supplicant's P2P device for the client iface
 CAN_HOST=0; HAVE_DFS=0      # whether the client's channel can host an AP
-CAP_APSTA=0; CAP_APSTA_CH=0; CAP_P2PGO=0; CAP_P2P_CH=0
+CAP_APSTA=0; CAP_APSTA_CH=0; CAP_P2PGO=0; CAP_P2P_CH=0; CAP_P2PDEV=0
 MODE_CHOSEN=same; P2P_FREQ=0
 
 log(){ printf '[wifi-hotspot] %s\n' "$*" >&2; }
@@ -174,10 +174,10 @@ match($0, /^[[:space:]]*\*[[:space:]]*[0-9]+(\.[0-9]+)?[[:space:]]*MHz/) {
 '
 freq_flags(){ iw_phy_info | awk -v want="$1" "$_FREQFLAGS_AWK"; }
 
-# Fill CAP_* from the interface combinations.
+# Fill CAP_* from the interface combinations and the supported interface modes.
 probe_caps(){
-  local ap go ch _tot
-  CAP_APSTA=0; CAP_APSTA_CH=0; CAP_P2PGO=0; CAP_P2P_CH=0
+  local ap go ch _tot modes
+  CAP_APSTA=0; CAP_APSTA_CH=0; CAP_P2PGO=0; CAP_P2P_CH=0; CAP_P2PDEV=0
   while read -r ap go ch _tot; do
     if [ -z "${ap:-}" ]; then continue; fi
     if [ "$ap" = 1 ]; then
@@ -189,6 +189,14 @@ probe_caps(){
       if [ "$ch" -gt "$CAP_P2P_CH" ]; then CAP_P2P_CH=$ch; fi
     fi
   done < <(combos || true)
+  # wpa_supplicant can only run Wi-Fi Direct (p2p_group_add) if the driver
+  # offers a P2P device interface; mac80211 does not add one on its own.
+  modes=$(iw_phy_info | awk '
+    /^[[:space:]]*Supported interface modes/ { inblk = 1; next }
+    inblk && /^[[:space:]]*\*/ { print; next }
+    inblk { inblk = 0 }
+  ')
+  case "$modes" in *P2P-device*) CAP_P2PDEV=1 ;; esac
 }
 
 # Can a network be started on this frequency?  Sets HAVE_DFS.  6 GHz never can.
@@ -201,6 +209,17 @@ can_host_freq(){
   case "$flags" in *disabled*|*"no IR"*) return 1 ;; esac
   case "$flags" in *"radar detection"*) HAVE_DFS=1 ;; esac
   return 0
+}
+
+# Human-readable reason why a frequency cannot host a network here.
+host_reason(){
+  local f="$1" flags
+  [ "$f" -lt 5925 ] || { echo "6 GHz cannot host a hotspot"; return; }
+  flags=$(freq_flags "$f")
+  [ -n "$flags" ] || { echo "this card does not know the channel"; return; }
+  case "$flags" in *disabled*) echo "the channel is disabled in the current regulatory domain"; return ;; esac
+  case "$flags" in *"no IR"*)  echo "the channel is receive-only (no IR) here"; return ;; esac
+  echo "the channel is not usable for an access point"
 }
 
 # ---- channel helpers -------------------------------------------------------
@@ -426,16 +445,37 @@ p2p_socket_state(){
   local out
   out=$(wpa_cli -p "$WPA_CTRL_DIR" -i "$P2P_DEV" ping 2>&1 || true)
   case "$out" in
-    *PONG*)                 echo ok ;;
-    *"Permission denied"*)  echo denied ;;
-    *"No such file"*|*"No such device"*|*"Failed to connect"*) echo absent ;;
-    *)                      echo unknown ;;
+    *PONG*)                  echo ok ;;
+    *"Permission denied"*)   echo noperm ;;  # can't read the dir, so can't tell
+    *"No such file"*|*"No such device"*|*"Failed to connect"*|*"Connection refused"*)
+                             echo absent ;;
+    *)                       echo unknown ;;
   esac
 }
-p2p_ready(){ # usable to bring the group up (socket exists and wpa_cli is present)
-  command -v wpa_cli >/dev/null 2>&1 || return 1
-  case "$(p2p_socket_state)" in ok|denied) return 0 ;; *) return 1 ;; esac
+# Whether Wi-Fi Direct can be used, and if not, why.  Echoes one code:
+#   ok | no-wpa-cli | no-cap | no-dev | no-sock | noperm | unknown
+p2p_status(){
+  command -v wpa_cli >/dev/null 2>&1 || { echo no-wpa-cli; return; }
+  [ "$CAP_P2PGO" = 1 ] || { echo no-cap; return; }
+  [ "$CAP_P2PDEV" = 1 ] || { echo no-dev; return; }
+  case "$(p2p_socket_state)" in
+    ok)     echo ok ;;
+    noperm) echo noperm ;;
+    absent) echo no-sock ;;
+    *)      echo unknown ;;
+  esac
 }
+p2p_reason(){ # human text for a p2p_status code
+  case "$1" in
+    no-wpa-cli) echo "wpa_cli is not installed" ;;
+    no-cap)     echo "the driver cannot run a group owner with a client connection" ;;
+    no-dev)     echo "the driver offers no P2P-device interface" ;;
+    no-sock)    echo "wpa_supplicant has no P2P control socket at ${WPA_CTRL_DIR}/${P2P_DEV}" ;;
+    noperm)     echo "cannot read ${WPA_CTRL_DIR} (needs root)" ;;
+    *)          echo "Wi-Fi Direct is not available" ;;
+  esac
+}
+p2p_ready(){ [ "$(p2p_status)" = ok ]; }
 wpa_out(){ wpa_cli -p "$WPA_CTRL_DIR" -i "$P2P_DEV" "$@" 2>&1 || true; }
 wpa_ok(){ [ "$(wpa_out "$@" | tr -d '\r\n')" = OK ]; }
 wpa_set(){ # $1 = network id, $2 = passphrase
@@ -514,8 +554,8 @@ wait_go_iface(){ # $1 = space-separated interface names that existed before
 
 up_p2p(){
   command -v dnsmasq >/dev/null || die "dnsmasq is not installed"
-  [ "$CAP_P2PGO" = 1 ] || die "this card's driver does not allow a Wi-Fi Direct group alongside a client connection"
-  p2p_ready || die "Wi-Fi Direct needs wpa_supplicant's P2P control socket at ${WPA_CTRL_DIR}/${P2P_DEV} (and wpa_cli)"
+  local st; st=$(p2p_status)
+  [ "$st" = ok ] || die "cannot use Wi-Fi Direct: $(p2p_reason "$st")"
   local curmode; curmode=$(state_get MODE || true)
   if [ "${curmode:-}" = p2p ]; then
     AP_IF=$(state_get AP_IF || true)
@@ -608,7 +648,17 @@ cmd_up(){
   [ "$CAP_APSTA" = 1 ] || die "this card's driver cannot run an access point alongside a client connection"
   choose_mode
   log "uplink $(chan_label "$freq") -> ${MODE_CHOSEN} mode"
-  if [ "$MODE_CHOSEN" = p2p ]; then up_p2p; else up_same; fi
+  if [ "$MODE_CHOSEN" = p2p ]; then
+    up_p2p
+  elif [ "$CAN_HOST" != 1 ]; then
+    # Refuse up front with a clear reason instead of letting hostapd fail.
+    if p2p_ready; then
+      die "cannot share this connection: $(chan_label "$freq") cannot host an access point ($(host_reason "$freq")); use --mode p2p or MODE=auto"
+    fi
+    die "cannot share this connection: $(chan_label "$freq") cannot host an access point ($(host_reason "$freq")) and Wi-Fi Direct is unavailable ($(p2p_reason "$(p2p_status)"))"
+  else
+    up_same
+  fi
 }
 
 cmd_down(){
@@ -674,7 +724,7 @@ cmd_detect(){
   [ -n "$phy" ] || die "no Wi-Fi interface '${CLIENT}' found (set CLIENT= in /etc/wifi-hotspot.conf)"
   iw phy "$phy" info >/dev/null 2>&1 || die "cannot read 'iw phy ${phy} info'"
   probe_caps
-  local freq ssid driver apsta p2pgo ranges sockstate verdict
+  local freq ssid driver apsta p2pgo ranges sockstate verdict pst
   freq=$(client_freq || true)
   ssid=$(iw dev "$CLIENT" link 2>/dev/null | awk '/SSID:/{sub(/^[ \t]*SSID: /,"");print;exit}' || true)
   driver=$(basename "$(readlink -f "/sys/class/net/${CLIENT}/device/driver" 2>/dev/null || true)" 2>/dev/null || true)
@@ -683,8 +733,19 @@ cmd_detect(){
   if [ "$CAP_APSTA" = 0 ]; then apsta="no"
   elif [ "$CAP_APSTA_CH" -le 1 ]; then apsta="yes - same channel only"
   else apsta="yes - up to ${CAP_APSTA_CH} channels"; fi
-  if [ "$CAP_P2PGO" = 1 ]; then p2pgo="yes - group owner may use its own channel"
-  else p2pgo="no"; fi
+  if [ "$CAP_P2PGO" = 0 ]; then
+    p2pgo="no - the driver cannot use a group owner with a client"
+  elif [ "$CAP_P2PDEV" = 0 ]; then
+    p2pgo="no - the driver offers no P2P-device interface"
+  else
+    pst=$(p2p_status)
+    case "$pst" in
+      ok)      p2pgo="yes - group owner may use its own channel" ;;
+      noperm)  p2pgo="group owner possible; run as root to confirm" ;;
+      no-sock) p2pgo="no - wpa_supplicant has no P2P control socket" ;;
+      *)       p2pgo="no - $(p2p_reason "$pst")" ;;
+    esac
+  fi
 
   printf '\n  wifi-hotspot detect\n\n'
   printf '  %-14s: %s (%s)%s\n' "interface" "$CLIENT" "$phy" "${driver:+  [$driver]}"
@@ -711,13 +772,17 @@ cmd_detect(){
   printf '\n'
   printf '  %-14s: %s\n' "hostapd" "$(command -v hostapd || echo 'not installed')"
   printf '  %-14s: %s\n' "dnsmasq" "$(command -v dnsmasq || echo 'not installed')"
-  sockstate=$(p2p_socket_state)
-  case "$sockstate" in
-    ok)      printf '  %-14s: %s (ok)\n' "wpa_supplicant" "${WPA_CTRL_DIR}/${P2P_DEV}" ;;
-    denied)  printf '  %-14s: %s (present; root needed to confirm)\n' "wpa_supplicant" "${WPA_CTRL_DIR}/${P2P_DEV}" ;;
-    absent)  printf '  %-14s: no P2P control socket at %s (Wi-Fi Direct unavailable)\n' "wpa_supplicant" "${WPA_CTRL_DIR}/${P2P_DEV}" ;;
-    *)       printf '  %-14s: %s\n' "wpa_supplicant" "$sockstate" ;;
-  esac
+  if [ "$CAP_P2PDEV" = 0 ] || [ "$CAP_P2PGO" = 0 ]; then
+    printf '  %-14s: %s\n' "wpa_supplicant" "unused - driver has no Wi-Fi Direct support"
+  else
+    sockstate=$(p2p_socket_state)
+    case "$sockstate" in
+      ok)      printf '  %-14s: %s (ok)\n' "wpa_supplicant" "${WPA_CTRL_DIR}/${P2P_DEV}" ;;
+      noperm)  printf '  %-14s: %s (needs root to confirm)\n' "wpa_supplicant" "${WPA_CTRL_DIR}/${P2P_DEV}" ;;
+      absent)  printf '  %-14s: no P2P control socket at %s (Wi-Fi Direct unavailable)\n' "wpa_supplicant" "${WPA_CTRL_DIR}/${P2P_DEV}" ;;
+      *)       printf '  %-14s: %s\n' "wpa_supplicant" "$sockstate" ;;
+    esac
+  fi
 
   printf '\n'
   if [ -z "${freq:-}" ]; then
@@ -735,7 +800,7 @@ cmd_detect(){
   elif [ "$CAN_HOST" = 1 ]; then
     verdict="ready - DFS channel $(freq_chan "$freq") needs a radar check first (up to a minute)"
   else
-    verdict="cannot host on $(chan_label "$freq") and Wi-Fi Direct is unavailable; connect to a 2.4 GHz network"
+    verdict="cannot host on $(chan_label "$freq") and Wi-Fi Direct is unavailable"
   fi
   printf '  %-14s: %s\n\n' "verdict" "$verdict"
 }

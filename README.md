@@ -8,8 +8,9 @@ On Windows the built-in Mobile Hotspot seems to "just work" while you stay
 connected to Wi-Fi. That is not a different hardware capability: Windows silently
 puts the hotspot on the **same channel as your uplink**. NetworkManager does not,
 and it cannot drive both roles on its own. This tool does what Windows does, on
-Linux — and, when the uplink's channel genuinely cannot host an AP, falls back to
-a **Wi-Fi Direct** group owner on a channel of its own.
+Linux — and, where the driver supports it and the uplink's channel genuinely
+cannot host an AP, it can fall back to a **Wi-Fi Direct** group owner on a channel
+of its own.
 
 ## The problem
 
@@ -36,6 +37,19 @@ or 6 GHz generally. There, the second combination above is the answer: a
 **group owner** (Wi-Fi Direct) may use a channel of its own, and the radio hops
 between the two.
 
+That second combination is only usable if the driver exposes a **P2P device
+interface**, because that is how `wpa_supplicant` drives a group while it also
+serves the client connection. `iw phy` lists it as `P2P-device` under *Supported
+interface modes*, and `wifi-hotspot detect` reports it. Drivers differ:
+
+| driver | `P2P-GO` | `P2P-device` | Wi-Fi Direct usable |
+| ------ | -------- | ------------ | ------------------- |
+| `iwlwifi` (Intel) | yes | yes | yes |
+| `rtw89` (Realtek, e.g. RTL8852BE) | yes | **no** | **no** |
+
+On the cards in the bottom row, `MODE=auto` stays on the same channel — exactly
+what Windows does.
+
 ## What this does
 
 - Creates a second virtual interface (`ap0`) on the same phy in AP mode.
@@ -48,7 +62,8 @@ between the two.
   `ip filter` chains and removes it again on `down`. Set `MANAGE_FIREWALL=0` to
   leave the host firewall alone.
 - Falls back to a **Wi-Fi Direct group owner** (`MODE=auto`) when the uplink's
-  channel cannot host an AP, giving the hotspot a channel of its own.
+  channel cannot host an AP *and* the driver offers a P2P device interface,
+  giving the hotspot a channel of its own.
 - Ships a **NetworkManager dispatcher** that re-syncs the hotspot on reconnect or
   channel change (roaming), and tears it down when Wi-Fi disconnects.
 - Ships a **systemd unit** so it comes up at boot.
@@ -57,8 +72,9 @@ between the two.
 ## Requirements
 
 - Linux with: `iw`, `hostapd`, `dnsmasq`, `iptables`, `NetworkManager` (`nmcli`), `systemd`
-- For Wi-Fi Direct mode: `wpa_cli` and a NetworkManager built with `wpa_supplicant`
-  (the default). Verify the whole picture with:
+- For Wi-Fi Direct mode: `wpa_cli`, a NetworkManager built with `wpa_supplicant`
+  (the default), and a driver that exposes a `P2P-device` interface. Verify the
+  whole picture with:
 
   ```sh
   wifi-hotspot detect
@@ -111,15 +127,16 @@ after installing).
 | `p2p`  | `p2p-wlan0-0` (Wi-Fi Direct GO) | a channel of its own | uplink channel cannot host an AP |
 | `auto` | either of the above | — | default: `same`, else `p2p` |
 
-`detect` prints which one your card and current connection will use. On the
-example card above, Wi-Fi Direct is available (`#channels <= 2`), so an uplink on
-a DFS channel falls back to a group owner on 2.4 GHz channel 6.
+`detect` prints which one your card and current connection will use. `p2p` is only
+considered when the uplink's channel cannot host an AP **and** the driver exposes
+a P2P device interface; otherwise `auto` stays on `same`.
 
 > **`p2p` mode is experimental.** It relies on the `wpa_supplicant` that
-> NetworkManager runs and on the card/driver actually permitting a group owner
-> next to a client connection. `detect` tells you whether both are there; if it
-> fails, `MODE=same` is unaffected. It also still costs you throughput: one radio
-> hops between the two channels, which is worse than same-channel operation.
+> NetworkManager runs, on the card/driver offering a `P2P-device` interface, and
+> on a group owner being permitted next to a client connection. `detect` tells you
+> whether all of that is there; if not, `MODE=same` is used and nothing breaks. It
+> also costs throughput: one radio hops between the two channels, which is worse
+> than same-channel operation.
 
 ## Configuration
 
@@ -152,8 +169,9 @@ and stored in `/etc/hostapd/ap0.psk`. To change it, delete that file and run
   speed, share an *ethernet* uplink instead.
 - **5 GHz DFS channels** (52–144) can add a CAC delay; non-DFS 5 GHz and 2.4 GHz
   start instantly. Set `COUNTRY` so 5 GHz AP is permitted by the regulatory domain.
-- **`p2p` is experimental** (see above) and only used when the uplink channel
-  cannot host an AP.
+- **`p2p` is experimental** (see above), needs a driver that exposes a
+  `P2P-device` interface (Intel does, Realtek `rtw89` does not), and is only used
+  when the uplink channel cannot host an AP.
 
 ## Troubleshooting
 
@@ -165,19 +183,29 @@ and stored in `/etc/hostapd/ap0.psk`. To change it, delete that file and run
   interface automatically; if you manage the firewall yourself, allow UDP 67/53
   on the AP interface and forwarding between the AP and the uplink.
 - **Uplink is on a DFS / "no IR" / 6 GHz channel** — `MODE=auto` switches to a
-  Wi-Fi Direct group on its own channel. If `detect` says Wi-Fi Direct is
-  unavailable, connect on a 2.4 GHz or non-DFS 5 GHz network instead. To force the
-  old behaviour, set `MODE=same`.
+  Wi-Fi Direct group on its own channel if the driver supports one. If `detect`
+  says Wi-Fi Direct is unavailable (the norm on Realtek `rtw89`), connect on a
+  2.4 GHz or non-DFS 5 GHz network instead. To force the old behaviour, set
+  `MODE=same`.
 - **`Cannot enable IEEE 802.11h without IEEE 802.11d enabled`** / *`1 errors found
   in configuration file`* then *`Failed to set up interface`* — hostapd rejects the
   AP config. This happened on 5 GHz because every `hw_mode=a` channel got
   `ieee80211h=1`, which hostapd only accepts together with `ieee80211d=1` (and
   which is only *needed* on DFS channels). Current versions emit both only on DFS
   channels (5 GHz ch 52–64, 100–144).
-- **`Cannot start a Wi-Fi Direct group` / `wpa_supplicant created no group
-  interface`** — the card/driver did not permit a group owner alongside the client.
-  Run `wifi-hotspot detect`; if `Wi-Fi Direct` is `no`, use `MODE=same` on a
-  hostable channel.
+- **`cannot use Wi-Fi Direct: this driver offers no P2P device interface`** — the
+  driver cannot hand `wpa_supplicant` a P2P device while it serves the client
+  connection, so Wi-Fi Direct is not possible. Use `MODE=same` on a channel that
+  can host an AP (2.4 GHz, or non-DFS 5 GHz). Intel `iwlwifi` cards do support
+  this mode; Realtek `rtw89` cards do not.
+- **`cannot use Wi-Fi Direct: wpa_supplicant has no P2P control socket at
+  /run/wpa_supplicant/p2p-dev-…`** — the driver would allow it, but the running
+  `wpa_supplicant` has no P2P device. Check that it is not started with
+  `p2p_disabled=1`, and look in `/run/wpa_supplicant/`: next to the client's
+  socket there should be a `p2p-dev-<client>` socket.
+- **`cannot share this connection: … cannot host an access point …`** — the
+  uplink's channel is unusable for an AP (DFS/"no IR"/6 GHz) and Wi-Fi Direct is
+  unavailable. Reconnect on a hostable channel.
 - **`Error executing command as another user: No authentication agent found`**
   (pkexec) — no polkit agent was reachable from that shell (typical on a bare
   TTY). Run `sudo wifi-hotspot …`, keep a polkit agent running in your session, or
