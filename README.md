@@ -35,6 +35,11 @@ in the way on Linux:
 - Runs **hostapd** on it, pinned to the **same channel as the client**.
 - Gives it a **unique locally-administered MAC** (fixes the `ENOTUNIQ` failure).
 - Adds **dnsmasq** (DHCP + DNS) and **NAT** so hotspot clients share the Wi-Fi uplink.
+- Adds the **firewall** rules clients need. On hosts whose nftables ruleset has a
+  `policy drop` on `INPUT`/`forward` (e.g. Arch's `/etc/nftables.conf`) that drops
+  DHCP, it inserts a scoped `accept` for the AP interface into the existing
+  `ip filter` chains and removes it again on `down`. Set `MANAGE_FIREWALL=0` to
+  leave the host firewall alone.
 - Ships a **NetworkManager dispatcher** that re-syncs the hotspot on reconnect or
   channel change (roaming), and tears it down when Wi-Fi disconnects.
 - Ships a **systemd unit** so it comes up at boot.
@@ -113,6 +118,13 @@ and stored in `/etc/hostapd/ap0.psk`. To change it, delete that file and run
 
 ## Troubleshooting
 
+- **Clients get a `169.254.x.x` (APIPA) address or no internet** — DHCP/the
+  forward path is being dropped by a host firewall with a default-drop policy.
+  The classic case is Arch's `/etc/nftables.conf`: its `INPUT` chain
+  (`policy drop`) discards the DHCP `DISCOVER` before `dnsmasq` can answer, and
+  its `forward` chain blocks NAT. The tool inserts a scoped `accept` for the AP
+  interface automatically; if you manage the firewall yourself, allow UDP 67/53
+  on the AP interface and forwarding between the AP and the uplink.
 - **`Cannot enable IEEE 802.11h without IEEE 802.11d enabled`** / *`1 errors found
   in configuration file`* then *`Failed to set up interface`* — hostapd rejects the
   AP config. This happened on 5 GHz because every `hw_mode=a` channel got

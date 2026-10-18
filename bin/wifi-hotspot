@@ -20,6 +20,8 @@ DHCP_RANGE="10.42.0.10,10.42.0.200,12h"
 RUN_DIR="/run"
 SELF="$(readlink -f -- "$0")"
 HW=g; CH=0; DFS=0
+MANAGE_FIREWALL=1          # set to 0 to leave the host firewall untouched
+NFT_TAG="wifi-hotspot"     # comment tag on the nftables rules we add
 [ -r /etc/wifi-hotspot.conf ] && . /etc/wifi-hotspot.conf
 
 CONF="/etc/hostapd/${AP}.conf"
@@ -48,6 +50,59 @@ iface_chan(){ iw dev "$1" info 2>/dev/null | awk '/channel/{print $2; exit}'; }
 is_running(){
   [ -f "$HPID" ] && kill -0 "$(cat "$HPID")" 2>/dev/null && return 0
   pgrep -f "hostapd.*${CONF}" >/dev/null 2>&1
+}
+
+# ---- firewall --------------------------------------------------------------
+# Hosts commonly ship an nftables ruleset with `policy drop` on INPUT/forward
+# (e.g. Arch's /etc/nftables.conf).  iptables rules alone cannot punch through
+# that: a packet must be accepted by *every* base chain on the hook, so we add
+# a scoped accept rule for the AP interface into the existing `ip filter`
+# chains and remove it again on `down`.
+nft_ok(){ command -v nft >/dev/null 2>&1 && nft list table ip filter >/dev/null 2>&1; }
+nft_rule_add(){ # $1 = chain, rest = match spec
+  local ch="$1"; shift
+  nft list chain ip filter "$ch" >/dev/null 2>&1 || return 0
+  if nft -a list chain ip filter "$ch" 2>/dev/null | grep -q "comment \"$NFT_TAG\""; then
+    return 0
+  fi
+  nft insert rule ip filter "$ch" "$@" comment "\"$NFT_TAG\"" 2>/dev/null || true
+}
+nft_rules_del(){
+  command -v nft >/dev/null 2>&1 || return 0
+  local ch h
+  for ch in INPUT OUTPUT FORWARD forward input output; do
+    nft list chain ip filter "$ch" >/dev/null 2>&1 || continue
+    nft -a list chain ip filter "$ch" 2>/dev/null \
+      | awk -v t="$NFT_TAG" 'index($0,t){for(i=1;i<=NF;i++) if($i=="handle"){print $(i+1); break}}' \
+      | while read -r h; do nft delete rule ip filter "$ch" handle "$h" 2>/dev/null || true; done
+  done
+}
+ensure_fw(){
+  [ "$MANAGE_FIREWALL" = 1 ] || return 0
+  command -v sysctl >/dev/null 2>&1 && sysctl -qw net.ipv4.ip_forward=1 || true
+  # iptables: plain-iptables hosts and the iptables-nft compat chains.
+  if command -v iptables >/dev/null 2>&1; then
+    iptables -t nat -C POSTROUTING -o "$CLIENT" -j MASQUERADE 2>/dev/null || \
+      iptables -t nat -A POSTROUTING -o "$CLIENT" -j MASQUERADE
+    iptables -C FORWARD -i "$AP" -o "$CLIENT" -j ACCEPT 2>/dev/null || \
+      iptables -A FORWARD -i "$AP" -o "$CLIENT" -j ACCEPT
+    iptables -C FORWARD -i "$CLIENT" -o "$AP" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+      iptables -A FORWARD -i "$CLIENT" -o "$AP" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  fi
+  # nftables: also accept AP traffic in the native base chains.
+  if nft_ok; then
+    nft_rule_add INPUT   iifname "$AP" accept
+    nft_rule_add forward iifname "$AP" accept
+    nft_rule_add forward oifname "$AP" accept
+    nft_rule_add FORWARD iifname "$AP" accept
+    nft_rule_add FORWARD oifname "$AP" accept
+  fi
+}
+remove_fw(){
+  iptables -t nat -D POSTROUTING -o "$CLIENT" -j MASQUERADE 2>/dev/null || true
+  iptables -D FORWARD -i "$AP" -o "$CLIENT" -j ACCEPT 2>/dev/null || true
+  iptables -D FORWARD -i "$CLIENT" -o "$AP" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+  nft_rules_del
 }
 
 chan_band(){ # $1 = freq in MHz -> sets HW, CH and DFS
@@ -114,19 +169,15 @@ write_conf(){
 
 ensure_net(){
   ip addr replace "${AP_ADDR}/${AP_PREFIX}" dev "$AP"
-  sysctl -qw net.ipv4.ip_forward=1
-  iptables -t nat -C POSTROUTING -o "$CLIENT" -j MASQUERADE 2>/dev/null || \
-    iptables -t nat -A POSTROUTING -o "$CLIENT" -j MASQUERADE
-  iptables -C FORWARD -i "$AP" -o "$CLIENT" -j ACCEPT 2>/dev/null || \
-    iptables -A FORWARD -i "$AP" -o "$CLIENT" -j ACCEPT
-  iptables -C FORWARD -i "$CLIENT" -o "$AP" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
-    iptables -A FORWARD -i "$CLIENT" -o "$AP" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  ensure_fw
   if [ -f "$DPID" ] && kill -0 "$(cat "$DPID")" 2>/dev/null; then
     :
   else
     dnsmasq --interface="$AP" --bind-interfaces \
       --dhcp-range="$DHCP_RANGE" \
       --dhcp-option=3,"$AP_ADDR" --dhcp-option=6,"$AP_ADDR" \
+      --dhcp-authoritative \
+      --dhcp-leasefile="${RUN_DIR}/dnsmasq-${AP}.leases" \
       --pid-file="$DPID" --conf-file=/dev/null
   fi
 }
@@ -141,9 +192,7 @@ stop_services(){
     kill "$(cat "$DPID")" 2>/dev/null || true
   fi
   rm -f "$DPID" 2>/dev/null || true
-  iptables -t nat -D POSTROUTING -o "$CLIENT" -j MASQUERADE 2>/dev/null || true
-  iptables -D FORWARD -i "$AP" -o "$CLIENT" -j ACCEPT 2>/dev/null || true
-  iptables -D FORWARD -i "$CLIENT" -o "$AP" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+  remove_fw
 }
 
 # ---- commands --------------------------------------------------------------
