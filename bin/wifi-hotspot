@@ -647,8 +647,19 @@ cmd_sync(){
 }
 
 cmd_status(){
-  local mode apif
+  local mode apif g ss
   mode=$(state_get MODE || true); apif=$(state_get AP_IF || true)
+  if [ -z "${mode:-}" ]; then
+    # No state file (e.g. started by an older version): infer from what runs.
+    if is_running; then
+      mode=same; apif="$AP"
+    else
+      for g in $(go_ifaces); do
+        ss=$(iface_ssid "$g" || true)
+        if [ "$ss" = "$SSID" ]; then mode=p2p; apif="$g"; break; fi
+      done
+    fi
+  fi
   [ -n "${apif:-}" ] || apif="$AP"
   printf 'client %-6s: ' "$CLIENT"; iw dev "$CLIENT" link 2>/dev/null | awk '/SSID|freq/{printf "%s ",$0} END{print ""}' || true
   printf 'mode         : '; if [ -n "${mode:-}" ]; then echo "${mode} (${apif})"; else echo "not running (configured: ${MODE})"; fi
@@ -737,20 +748,22 @@ parse_args(){ # skip the command word; accept --mode
   shift || true
   while [ $# -gt 0 ]; do
     case "$1" in
-      --mode)   MODE="${2:-}"; shift 2 ;;
+      --mode)   [ $# -ge 2 ] || die "--mode needs a value (auto, same or p2p)"; MODE="$2"; shift 2 ;;
       --mode=*) MODE="${1#*=}"; shift ;;
       *)        die "unknown option: $1" ;;
     esac
   done
+  case "$MODE" in auto|same|p2p) ;; *) die "MODE must be auto, same or p2p (got '$MODE')" ;; esac
 }
 
 cmd="${1:-status}"
+case "$cmd" in up|restart|sync) parse_args "$@" ;; esac  # reject bad options before elevating
 case "$cmd" in up|down|restart|sync) as_root "$@" ;; esac
 case "$cmd" in
-  up)      parse_args "$@"; cmd_up ;;
+  up)      cmd_up ;;
   down)    cmd_down ;;
-  restart) parse_args "$@"; cmd_down; cmd_up ;;
-  sync)    parse_args "$@"; cmd_sync ;;
+  restart) cmd_down; cmd_up ;;
+  sync)    cmd_sync ;;
   status)  cmd_status ;;
   detect)  cmd_detect ;;
   -h|--help|help) usage; exit 0 ;;
