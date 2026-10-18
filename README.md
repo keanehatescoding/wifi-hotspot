@@ -53,6 +53,12 @@ owner next to a managed interface on a channel of its own** — the second
 combination above. `wifi-hotspot detect` probes the running `wpa_supplicant` and
 reports which layout you have.
 
+Verified end to end on an RTL8852BE (`rtw89_8852be`): the client stayed connected
+on 5 GHz channel 36 while the group owner ran as `p2p-wlan0-0` on 2.4 GHz channel
+6, and a phone on the hotspot browsed through the uplink. So on this card the
+Wi-Fi Direct path is not the same channel at all — it is a second channel, which
+is what makes `MODE=auto` useful on a DFS uplink.
+
 ## What this does
 
 - Creates a second virtual interface (`ap0`) on the same phy in AP mode.

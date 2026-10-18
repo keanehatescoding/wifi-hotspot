@@ -691,7 +691,11 @@ cmd_down(){
   local mode apif
   mode=$(state_get MODE || true); apif=$(state_get AP_IF || true)
   AP_IF="${apif:-$AP}"
-  log "stopping hotspot (${mode:-unknown} mode on ${AP_IF})"
+  if [ -n "${mode:-}" ]; then
+    log "stopping hotspot (${mode} mode on ${AP_IF})"
+  else
+    log "no state file; cleaning up ${AP_IF} and any leftover Wi-Fi Direct group"
+  fi
   remove_existing
 }
 
@@ -797,12 +801,22 @@ cmd_detect(){
   if [ -n "${freq:-}" ]; then
     chan_band "$freq"
     if can_host_freq "$freq"; then CAN_HOST=1; else CAN_HOST=0; fi
-    if [ "$CAN_HOST" = 1 ]; then
-      printf '  %-14s: %s - can host an AP\n' "this channel" "$(chan_label "$freq")"
-    else
+    if [ "$CAN_HOST" != 1 ]; then
       printf '  %-14s: %s - cannot host an AP\n' "this channel" "$(chan_label "$freq")"
+    elif [ "$HAVE_DFS" = 1 ]; then
+      printf '  %-14s: %s - can host an AP, after a radar check\n' "this channel" "$(chan_label "$freq")"
+    else
+      printf '  %-14s: %s - can host an AP\n' "this channel" "$(chan_label "$freq")"
     fi
     choose_mode
+    # The channel a Wi-Fi Direct group would get, so MODE=p2p is not opaque.
+    if [ "$CAP_P2PGO" = 1 ]; then
+      gf=$(p2p_freq 2>/dev/null || true)
+      if [ -n "${gf:-}" ]; then
+        printf '  %-14s: %s - channel the Wi-Fi Direct group would get\n' \
+          "group channel" "$(chan_label "$gf")"
+      fi
+    fi
   fi
 
   printf '\n'
