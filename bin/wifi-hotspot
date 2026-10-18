@@ -59,13 +59,13 @@ is_running(){
 # a scoped accept rule for the AP interface into the existing `ip filter`
 # chains and remove it again on `down`.
 nft_ok(){ command -v nft >/dev/null 2>&1 && nft list table ip filter >/dev/null 2>&1; }
-nft_rule_add(){ # $1 = chain, rest = match spec
-  local ch="$1"; shift
+nft_rule_add(){ # $1 = chain, $2 = iifname|oifname, $3 = interface
+  local ch="$1" dir="$2" dev="$3"
   nft list chain ip filter "$ch" >/dev/null 2>&1 || return 0
-  if nft -a list chain ip filter "$ch" 2>/dev/null | grep -q "comment \"$NFT_TAG\""; then
+  if nft -a list chain ip filter "$ch" 2>/dev/null | grep -q "$dir \"$dev\" accept comment \"$NFT_TAG\""; then
     return 0
   fi
-  nft insert rule ip filter "$ch" "$@" comment "\"$NFT_TAG\"" 2>/dev/null || true
+  nft insert rule ip filter "$ch" "$dir" "$dev" accept comment "\"$NFT_TAG\"" 2>/dev/null || true
 }
 nft_rules_del(){
   command -v nft >/dev/null 2>&1 || return 0
@@ -91,11 +91,11 @@ ensure_fw(){
   fi
   # nftables: also accept AP traffic in the native base chains.
   if nft_ok; then
-    nft_rule_add INPUT   iifname "$AP" accept
-    nft_rule_add forward iifname "$AP" accept
-    nft_rule_add forward oifname "$AP" accept
-    nft_rule_add FORWARD iifname "$AP" accept
-    nft_rule_add FORWARD oifname "$AP" accept
+    nft_rule_add INPUT   iifname "$AP"
+    nft_rule_add forward iifname "$AP"
+    nft_rule_add forward oifname "$AP"
+    nft_rule_add FORWARD iifname "$AP"
+    nft_rule_add FORWARD oifname "$AP"
   fi
 }
 remove_fw(){
