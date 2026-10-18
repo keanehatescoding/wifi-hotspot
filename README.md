@@ -79,6 +79,10 @@ wifi-hotspot sync       # re-pin to the client's current channel
 Once installed, the hotspot follows your Wi-Fi automatically: connect to a network
 and the AP comes up on that network's channel; roam and it re-pins.
 
+`status` never needs root. The other actions re-exec themselves as root via
+`pkexec` (falling back to `sudo`); set `WIFI_HOTSPOT_ELEVATE=sudo` to force a
+particular elevator.
+
 ## Configuration
 
 Edit `/etc/wifi-hotspot.conf`:
@@ -106,6 +110,24 @@ and stored in `/etc/hostapd/ap0.psk`. To change it, delete that file and run
 - **5 GHz DFS channels** (52–144) can add a CAC delay; non-DFS 5 GHz and 2.4 GHz
   start instantly. Set `COUNTRY` so 5 GHz AP is permitted by the regulatory domain.
 - Not related to Wi-Fi Direct / P2P; this uses a plain AP interface.
+
+## Troubleshooting
+
+- **`Cannot enable IEEE 802.11h without IEEE 802.11d enabled`** / *`1 errors found
+  in configuration file`* then *`Failed to set up interface`* — hostapd rejects the
+  AP config. This happened on 5 GHz because every `hw_mode=a` channel got
+  `ieee80211h=1`, which hostapd only accepts together with `ieee80211d=1` (and
+  which is only *needed* on DFS channels). Current versions emit both only on DFS
+  channels (5 GHz ch 52–64, 100–144).
+- **`Error executing command as another user: No authentication agent found`**
+  (pkexec) — no polkit agent was reachable from that shell (typical on a bare
+  TTY). Run `sudo wifi-hotspot …`, keep a polkit agent running in your session, or
+  set `WIFI_HOTSPOT_ELEVATE=sudo`.
+- **`wpa_supplicant couldn't grab this interface`** — NetworkManager is trying to
+  manage `ap0`. The tool sets it unmanaged (`nmcli device set ap0 managed no`);
+  check `nmcli device status` if it recurs.
+- **`Name not unique on network`** — the AP interface reused the client's MAC. The
+  tool assigns a unique locally-administered MAC, so update if you see this.
 
 ## Uninstall
 

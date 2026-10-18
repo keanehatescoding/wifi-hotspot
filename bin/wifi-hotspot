@@ -18,6 +18,8 @@ AP_ADDR="10.42.0.1"
 AP_PREFIX="24"
 DHCP_RANGE="10.42.0.10,10.42.0.200,12h"
 RUN_DIR="/run"
+SELF="$(readlink -f -- "$0")"
+HW=g; CH=0; DFS=0
 [ -r /etc/wifi-hotspot.conf ] && . /etc/wifi-hotspot.conf
 
 CONF="/etc/hostapd/${AP}.conf"
@@ -27,7 +29,18 @@ HPID="${RUN_DIR}/hostapd-${AP}.pid"
 
 log(){ printf '[wifi-hotspot] %s\n' "$*" >&2; }
 die(){ log "ERROR: $*"; exit 1; }
-as_root(){ [ "$(id -u)" -eq 0 ] || exec pkexec --disable-internal-agent "$0" "$@"; }
+# Re-exec self as root.  pkexec first (no --disable-internal-agent so it can
+# prompt on a terminal when no GUI polkit agent is registered), then sudo.
+as_root(){
+  [ "$(id -u)" -eq 0 ] && return 0
+  local elev="${WIFI_HOTSPOT_ELEVATE:-}"
+  if [ -z "$elev" ]; then
+    if   command -v pkexec >/dev/null 2>&1; then elev=pkexec
+    elif command -v sudo   >/dev/null 2>&1; then elev=sudo
+    else die "root privileges required (install polkit/pkexec or sudo)"; fi
+  fi
+  exec "$elev" "$SELF" "$@"
+}
 
 # ---- helpers ---------------------------------------------------------------
 client_freq(){ iw dev "$CLIENT" link 2>/dev/null | awk '/freq:/{printf "%d\n", $2; exit}'; }
@@ -37,11 +50,16 @@ is_running(){
   pgrep -f "hostapd.*${CONF}" >/dev/null 2>&1
 }
 
-chan_band(){ # $1 = freq in MHz -> sets HW and CH
+chan_band(){ # $1 = freq in MHz -> sets HW, CH and DFS
   local f="$1"
+  DFS=0
   if   [ "$f" -lt 2500 ]; then HW=g; CH=$(( (f - 2407) / 5 ))
-  elif [ "$f" -lt 5950 ]; then HW=a; CH=$(( (f - 5000) / 5 ))
-  else                         HW=a; CH=$(( (f - 5950) / 5 )); fi
+  elif [ "$f" -lt 5925 ]; then
+    HW=a; CH=$(( (f - 5000) / 5 ))
+    # 5 GHz DFS: UNII-2A 5260-5320 (ch 52-64), UNII-2C 5500-5720 (ch 100-144)
+    if { [ "$f" -ge 5260 ] && [ "$f" -le 5320 ]; } || \
+       { [ "$f" -ge 5500 ] && [ "$f" -le 5720 ]; }; then DFS=1; fi
+  else                         HW=a; CH=$(( (f - 5950) / 5 )); [ "$CH" -lt 1 ] && CH=1; fi
 }
 
 gen_mac(){ # locally-administered MAC derived from CLIENT's MAC
@@ -82,7 +100,13 @@ write_conf(){
     printf 'rsn_pairwise=CCMP\n'
     if [ "$HW" = a ]; then
       printf 'ieee80211ac=1\n'
-      printf 'ieee80211h=1\n'
+      # 802.11h (DFS radar detection + TPC) is only needed on DFS channels
+      # and hostapd refuses to enable it without 802.11d, so emitting it
+      # unconditionally breaks non-DFS 5 GHz channels (e.g. ch 36).
+      if [ "$DFS" -eq 1 ]; then
+        printf 'ieee80211d=1\n'
+        printf 'ieee80211h=1\n'
+      fi
     fi
   } >"$CONF"
   chmod 600 "$CONF"
@@ -130,7 +154,7 @@ cmd_up(){
   local freq; freq=$(client_freq || true)
   [ -n "${freq:-}" ] || die "client '${CLIENT}' is not connected to Wi-Fi; AP channel unknown"
   chan_band "$freq"
-  log "uplink ${freq} MHz -> AP ${AP} on channel ${CH} (hw_mode=${HW})"
+  log "uplink ${freq} MHz -> AP ${AP} on channel ${CH} (hw_mode=${HW}, dfs=${DFS})"
 
   if is_running && [ "$(iface_chan "$AP" || true)" = "$CH" ]; then
     log "hotspot already running on channel ${CH}"
