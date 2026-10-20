@@ -57,7 +57,7 @@ run_case() {
 
   # Run installer
   set +e
-  DESTDIR="$root" PATH="$STUBDIR:$PATH" bash "$HERE/install.sh" >"$TMPROOT/out_$name.txt" 2>&1
+  DESTDIR="$root" PATH="$STUBDIR:$PATH" sh "$HERE/install.sh" >"$TMPROOT/out_$name.txt" 2>&1
   local rc=$?
   set -e
 
@@ -117,12 +117,12 @@ printf '%s\n' "$cfg" > "$root/etc/wifi-hotspot.conf"
 orig=$(md5sum < "$root/etc/wifi-hotspot.conf")
 export DESTDIR="$root"
 : > "$STUB_LOG"
-DESTDIR="$root" PATH="$STUBDIR:$PATH" bash "$HERE/install.sh" >/tmp/out_upgrade.txt 2>&1
+DESTDIR="$root" PATH="$STUBDIR:$PATH" sh "$HERE/install.sh" >$TMPROOT/out_upgrade.txt 2>&1
 rc=$?
 new=$(md5sum < "$root/etc/wifi-hotspot.conf")
 if [ "$rc" -ne 0 ]; then echo "  [upgrade] FAIL: exit $rc"; FAIL=1
 elif [ "$orig" != "$new" ]; then echo "  [upgrade] FAIL: config was modified"; FAIL=1
-elif ! grep -q "Installed. Status:" /tmp/out_upgrade.txt; then echo "  [upgrade] FAIL: no status"; FAIL=1
+elif ! grep -q "Installed. Status:" $TMPROOT/out_upgrade.txt; then echo "  [upgrade] FAIL: no status"; FAIL=1
 else echo "  [upgrade] PASS"; fi
 
 # Case 6: malformed config -> non-zero exit, error message
@@ -132,11 +132,11 @@ printf 'SSID="unterminated\nCOUNTRY="KE"\n' > "$root/etc/wifi-hotspot.conf"
 export DESTDIR="$root"
 : > "$STUB_LOG"
 set +e
-DESTDIR="$root" PATH="$STUBDIR:$PATH" bash "$HERE/install.sh" >/tmp/out_malformed.txt 2>&1
+DESTDIR="$root" PATH="$STUBDIR:$PATH" sh "$HERE/install.sh" >$TMPROOT/out_malformed.txt 2>&1
 rc=$?
 set -e
 if [ "$rc" -eq 0 ]; then echo "  [malformed] FAIL: expected non-zero exit"; FAIL=1
-elif ! grep -q "syntax error" /tmp/out_malformed.txt; then echo "  [malformed] FAIL: missing error message"; FAIL=1
+elif ! grep -q "syntax error" $TMPROOT/out_malformed.txt; then echo "  [malformed] FAIL: missing error message"; FAIL=1
 else echo "  [malformed] PASS"; fi
 
 if [ "$FAIL" = "1" ]; then
