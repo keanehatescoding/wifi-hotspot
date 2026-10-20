@@ -23,7 +23,7 @@ jobs:
         run: |
           shellcheck -s bash -e SC1091,SC2016 bin/wifi-hotspot
           shellcheck -s sh -e SC1091 NetworkManager/90-wifi-hotspot
-          shellcheck -s sh install.sh
+          shellcheck -s sh -e SC1091 install.sh
 
       - name: QR escape tests
         run: tests/test_qr_escape.sh

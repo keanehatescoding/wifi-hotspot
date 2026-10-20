@@ -96,6 +96,12 @@ git clone https://github.com/keanehatescoding/wifi-hotspot
 cd wifi-hotspot
 sudo make install
 sudo systemctl daemon-reload
+```
+
+Then edit `/etc/wifi-hotspot.conf` and set `SSID` and `COUNTRY` (ISO 3166-1 alpha-2)
+— both are required; there are no defaults (see Configuration below). Once set:
+
+```sh
 sudo systemctl enable --now wifi-hotspot.service
 ```
 
@@ -104,6 +110,10 @@ or simply:
 ```sh
 sudo ./install.sh
 ```
+
+`install.sh` enables the service and starts it automatically once `SSID` and
+`COUNTRY` are set; otherwise it enables it without starting and prints the
+next step, so a fresh install never fails on a missing config.
 
 ## Usage
 
