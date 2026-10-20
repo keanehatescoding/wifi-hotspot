@@ -6,17 +6,17 @@ set -eu
 
 here="$(cd "$(dirname "$0")" && pwd)"
 
-install -Dm755 "$here/bin/wifi-hotspot"               /usr/local/bin/wifi-hotspot
-if [ -f /etc/wifi-hotspot.conf ]; then
-  echo "keeping existing config: /etc/wifi-hotspot.conf"
+install -Dm755 "$here/bin/wifi-hotspot"               "${DESTDIR:-}/usr/local/bin/wifi-hotspot"
+if [ -f "${DESTDIR:-}/etc/wifi-hotspot.conf" ]; then
+  echo "keeping existing config: ${DESTDIR:-}/etc/wifi-hotspot.conf"
 else
-  install -Dm644 "$here/config/wifi-hotspot.conf" /etc/wifi-hotspot.conf
+  install -Dm644 "$here/config/wifi-hotspot.conf" "${DESTDIR:-}/etc/wifi-hotspot.conf"
   echo "installed default config: /etc/wifi-hotspot.conf"
 fi
-install -Dm644 "$here/systemd/wifi-hotspot.service"   /etc/systemd/system/wifi-hotspot.service
-install -Dm755 "$here/NetworkManager/90-wifi-hotspot" /etc/NetworkManager/dispatcher.d/90-wifi-hotspot
-install -Dm644 "$here/man/wifi-hotspot.8"             /usr/local/share/man/man8/wifi-hotspot.8
-chown root:root /etc/NetworkManager/dispatcher.d/90-wifi-hotspot
+install -Dm644 "$here/systemd/wifi-hotspot.service"   "${DESTDIR:-}/etc/systemd/system/wifi-hotspot.service"
+install -Dm755 "$here/NetworkManager/90-wifi-hotspot" "${DESTDIR:-}/etc/NetworkManager/dispatcher.d/90-wifi-hotspot"
+install -Dm644 "$here/man/wifi-hotspot.8"             "${DESTDIR:-}/usr/local/share/man/man8/wifi-hotspot.8"
+chown root:root "${DESTDIR:-}/etc/NetworkManager/dispatcher.d/90-wifi-hotspot"
 
 systemctl daemon-reload
 
@@ -25,13 +25,19 @@ systemctl daemon-reload
 # config: with SSID/COUNTRY unset `up` fails and `enable --now` would
 # abort this installer under `set -e` before printing any guidance.
 SSID=""; COUNTRY=""
-[ -r /etc/wifi-hotspot.conf ] && . /etc/wifi-hotspot.conf 2>/dev/null || true
+if [ -r "${DESTDIR:-}/etc/wifi-hotspot.conf" ]; then
+  # shellcheck disable=SC1091
+  if ! . "${DESTDIR:-}/etc/wifi-hotspot.conf"; then
+    echo "error: /etc/wifi-hotspot.conf has a syntax error" >&2
+    exit 1
+  fi
+fi
 
 if [ -n "${SSID:-}" ] && [ -n "${COUNTRY:-}" ]; then
   systemctl enable --now wifi-hotspot.service
   echo
   echo "Installed. Status:"
-  /usr/local/bin/wifi-hotspot status || true
+  "${DESTDIR:-}/usr/local/bin/wifi-hotspot" status || true
 else
   systemctl enable wifi-hotspot.service
   echo

@@ -28,5 +28,8 @@ jobs:
       - name: QR escape tests
         run: tests/test_qr_escape.sh
 
+      - name: Install script tests
+        run: sudo bash tests/test_install.sh
+
       - name: Lock inheritance test
         run: tests/test_lock.sh
