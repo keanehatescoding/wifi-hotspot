@@ -380,7 +380,7 @@ ensure_net(){
   if [ -f "$DPID" ] && kill -0 "$(cat "$DPID")" 2>/dev/null; then
     :
   else
-    dnsmasq --interface="$AP_IF" --bind-interfaces \
+    dnsmasq --interface="$AP_IF" --except-interface=lo --bind-interfaces \
       --dhcp-range="$DHCP_RANGE" \
       --dhcp-option=3,"$AP_ADDR" --dhcp-option=6,"$AP_ADDR" \
       --dhcp-authoritative \
@@ -845,9 +845,32 @@ cmd_detect(){
   printf '  %-14s: %s\n\n' "verdict" "$verdict"
 }
 
+cmd_qr(){
+  # Print (and optionally save) a scannable QR code for the running hotspot.
+  # Usage: wifi-hotspot qr [output.png]
+  local out="${1:-}" psk wifi
+  psk=$(get_psk)
+  [ -n "$psk" ] || die "no PSK found (check $PSKFILE)"
+  wifi="WIFI:T:WPA;S:${SSID};P:${psk};H:false;;"
+  if ! command -v qrencode >/dev/null 2>&1; then
+    echo "qrencode is not installed (install 'qrencode' to render a QR code)."
+    echo "WiFi string: $wifi"
+    return 0
+  fi
+  printf 'SSID:     %s\n' "$SSID"
+  printf 'Password: %s\n' "$psk"
+  printf 'Security: WPA2 (WPA-PSK)\n'
+  if [ -n "$out" ]; then
+    qrencode -o "$out" -s 8 -m 2 "$wifi" && printf 'saved: %s\n' "$out"
+  fi
+  printf '\n=== scan with your phone camera ===\n'
+  qrencode -t UTF8 "$wifi"
+}
+
 usage(){
-  printf 'Usage: wifi-hotspot {up|down|restart|sync|status|detect}\n' >&2
+  printf 'Usage: wifi-hotspot {up|down|restart|sync|status|detect|qr}\n' >&2
   printf '       wifi-hotspot up [--mode auto|same|p2p]\n' >&2
+  printf '       wifi-hotspot qr [output.png]\n' >&2
 }
 parse_args(){ # skip the command word; accept --mode
   shift || true
@@ -863,7 +886,7 @@ parse_args(){ # skip the command word; accept --mode
 
 cmd="${1:-status}"
 case "$cmd" in up|restart|sync) parse_args "$@" ;; esac  # reject bad options before elevating
-case "$cmd" in up|down|restart|sync) as_root "$@" ;; esac
+case "$cmd" in up|down|restart|sync|qr) as_root "$@" ;; esac
 case "$cmd" in
   up)      cmd_up ;;
   down)    cmd_down ;;
@@ -871,6 +894,7 @@ case "$cmd" in
   sync)    cmd_sync ;;
   status)  cmd_status ;;
   detect)  cmd_detect ;;
+  qr)      cmd_qr "${2:-}" ;;
   -h|--help|help) usage; exit 0 ;;
   *)       usage; exit 1 ;;
 esac

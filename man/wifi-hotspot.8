@@ -4,7 +4,7 @@
 wifi\-hotspot \- share a Wi\-Fi client uplink as an access point
 .SH SYNOPSIS
 .nf
-\fBwifi\-hotspot\fR { up | down | restart | sync | status | detect }
+\fBwifi\-hotspot\fR { up | down | restart | sync | status | detect | qr }
 \fBwifi\-hotspot up\fR [ \fB\-\-mode\fR \fIauto\fR | \fIsame\fR | \fIp2p\fR ]
 .fi
 .SH DESCRIPTION
@@ -156,6 +156,19 @@ an ordinary user this one line is a guess and is reported as such.
 Use it to tell a bug report or a
 .B MODE
 choice apart from a hardware limit.
+.PP
+.TP
+.B qr [output.png]
+Print a scannable QR code for the hotspot's current SSID and password, so a
+phone can join without typing the key.  The password is read from
+.BR \(ti /etc/hostapd/ap0.psk
+(or generated on first use) and never echoed to the terminal in plain text
+beyond the single line shown.  With an optional
+.I output.png
+argument the code is also written as a PNG file.  Requires
+.BR qrencode (1);
+without it the WiFi URI is printed instead.  Works whether or not the hotspot
+is currently up, since the credentials come from the configuration.
 .PP
 Except for
 .BR status
@@ -442,6 +455,8 @@ Ask what the machine can do:
 .nf
 .RS
 $ wifi\-hotspot detect           # as root, so the P2P line is definite
+
+$ wifi\-hotspot qr phone.png   # print + save a join QR code
 
   wifi\-hotspot detect
 

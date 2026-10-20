@@ -114,9 +114,14 @@ wifi-hotspot up         # create/ensure the hotspot
 wifi-hotspot restart    # recreate (e.g. after changing config)
 wifi-hotspot down       # tear it down
 wifi-hotspot sync       # re-pin to the client's current channel
+wifi-hotspot qr        # print a scannable QR code for the SSID/password
+wifi-hotspot qr FILE   # ...and save it as a PNG
 ```
 
 `up` accepts `--mode auto|same|p2p` to override the configured mode for one run.
+
+`qr` needs `qrencode` (package `qrencode` / `libqrencode`); without it the
+WiFi URI is printed instead of a scannable code.
 
 Once installed, the hotspot follows your Wi-Fi automatically: connect to a network
 and the AP comes up on that network's channel; roam and it re-pins.
