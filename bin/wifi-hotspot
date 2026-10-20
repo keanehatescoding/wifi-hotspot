@@ -33,7 +33,7 @@ P2P_BAND="bg"               # band for the Wi-Fi Direct group's own channel: bg 
 P2P_CHANNEL="auto"          # channel number for the group, or auto
 WPA_CTRL_DIR="/run/wpa_supplicant"
 SELF="$(readlink -f -- "$0")"
-VERSION="0.1.8"
+VERSION="0.1.9"
 HW=g; CH=0; DFS=0
 MANAGE_FIREWALL=1           # set to 0 to leave the host firewall untouched
 NFT_TAG="wifi-hotspot"      # comment tag on the nftables rules we add
