@@ -35,8 +35,12 @@ while IFS= read -r line; do
   [[ "$line" =~ ^[01]\ [01]\ [0-9]+\ [0-9]+$ ]] || { echo "FAIL: bad combos line: $line"; exit 1; }
   n=$((n+1))
 done <<< "$out"
-[ "$n" -ge 1 ] || { echo "FAIL: no combos parsed"; exit 1; }
-echo "ok: combos output well-formed ($n combo(s))"
+[ "$n" -eq 2 ] || { echo "FAIL: expected 2 combos, got $n"; exit 1; }
+# Exact values for this card (RTL8852BE): AP+client on 1 channel,
+# group owner usable on 2 channels.
+[ "$(sed -n '1p' <<< "$out")" = "1 1 1 2" ] || { echo "FAIL: combo 1 mismatch"; exit 1; }
+[ "$(sed -n '2p' <<< "$out")" = "0 1 2 2" ] || { echo "FAIL: combo 2 mismatch"; exit 1; }
+echo "ok: combos output matches expected values (P2P_CH=2)"
 
 echo
 echo "=== host ranges ==="
@@ -57,6 +61,19 @@ echo "  -> $out"
 # Should mention the channel is usable (no 'disabled'/'no IR' would have skipped it)
 [ -n "$out" ] || { echo "FAIL: no freq flags for 2412"; exit 1; }
 echo "ok: freq_flags output non-empty"
+
+echo
+echo "=== freq_flags DFS consistency ==="
+FREQFLAGS_AWK=$(extract _FREQFLAGS_AWK)
+# 5745 MHz (ch 149) is flagged "radar detection" in the sample -> DFS
+out=$(awk -v want=5745 "$FREQFLAGS_AWK" "$SAMPLE")
+echo "  5745 MHz: $out"
+echo "$out" | grep -q "radar detection" || { echo "FAIL: 5745 should be DFS"; exit 1; }
+# 5180 MHz (ch 36) is not
+out=$(awk -v want=5180 "$FREQFLAGS_AWK" "$SAMPLE")
+echo "  5180 MHz: $out"
+echo "$out" | grep -q "radar detection" && { echo "FAIL: 5180 should not be DFS"; exit 1; } || true
+echo "ok: DFS detection matches iw flags"
 
 echo
 echo "=== ALL IW PARSE TESTS PASSED ==="

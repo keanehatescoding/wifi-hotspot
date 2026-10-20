@@ -254,9 +254,10 @@ chan_band(){ # $1 = freq in MHz -> sets HW, CH and DFS
     if [ "$f" = 2484 ]; then CH=14; fi
   elif [ "$f" -lt 5925 ]; then
     HW=a; CH=$(( (f - 5000) / 5 ))
-    # 5 GHz DFS: UNII-2A 5260-5320 (ch 52-64), UNII-2C 5500-5720 (ch 100-144)
-    if { [ "$f" -ge 5260 ] && [ "$f" -le 5320 ]; } || \
-       { [ "$f" -ge 5500 ] && [ "$f" -le 5720 ]; }; then DFS=1; fi
+    # DFS: derive from iw's own "radar detection" flag rather than a
+    # hard-coded frequency list, so we never disagree with the kernel about
+    # which channels need 802.11h (e.g. UNII-3 channels some cards mark DFS).
+    case "$(freq_flags "$f")" in *"radar detection"*) DFS=1 ;; esac
   else
     HW=a; CH=$(( (f - 5950) / 5 ))
     if [ "$CH" -lt 1 ]; then CH=1; fi
