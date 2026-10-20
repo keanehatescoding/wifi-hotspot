@@ -41,3 +41,13 @@ fi
 # cleanup any leftover sleepers
 pkill -f "sleep 30" 2>/dev/null || true
 rm -f "$LOCK"
+
+# Static guard: the daemon launches must close fd 9 so they cannot hold the lock.
+if ! grep -q 'hostapd .* 9>&-' bin/wifi-hotspot 2>/dev/null && ! grep -q "hostapd -B -P \"\$HPID\" \"\$CONF\" 9>&-" bin/wifi-hotspot; then
+  # fall back to searching the repo source
+  :
+fi
+src="$(cd "$(dirname "$0")/.." && pwd)/bin/wifi-hotspot"
+grep -q 'hostapd -B -P "$HPID" "$CONF" 9>&-' "$src" || { echo "FAIL: hostapd launch missing 9>&-"; exit 1; }
+grep -q -- '--conf-file=/dev/null 9>&-' "$src" || { echo "FAIL: dnsmasq launch missing 9>&-"; exit 1; }
+echo "ok:   daemon launches close fd 9 (9>&-)"

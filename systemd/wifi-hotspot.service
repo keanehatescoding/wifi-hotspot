@@ -12,7 +12,6 @@ ExecStop=/usr/local/bin/wifi-hotspot down
 TimeoutStartSec=120
 # Hardening (the service still needs CAP_NET_ADMIN etc. via the binary).
 PrivateTmp=yes
-ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictRealtime=yes

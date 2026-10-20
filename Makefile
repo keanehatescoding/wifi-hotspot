@@ -42,7 +42,6 @@ uninstall:
 	-rm -f $(DISPDIR)/90-wifi-hotspot
 	-rm -f $(UNITDIR)/wifi-hotspot.service
 	-rm -f $(MANDIR)/man8/wifi-hotspot.8
-	-rm -f $(DESTDIR)$(SYSCONFDIR)/wifi-hotspot.conf
 	-rm -f $(DESTDIR)$(SYSCONFDIR)/hostapd/$(AP).conf
-	-rm -f $(DESTDIR)$(SYSCONFDIR)/hostapd/$(AP).psk
-	@echo "Removed. (Run: systemctl daemon-reload)"
+	@echo "Removed. (config + password kept: $(DESTDIR)$(SYSCONFDIR)/wifi-hotspot.conf, $(DESTDIR)$(SYSCONFDIR)/hostapd/$(AP).psk)"
+	@echo "Run: systemctl daemon-reload"
