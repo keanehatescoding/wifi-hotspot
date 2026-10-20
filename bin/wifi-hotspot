@@ -845,13 +845,22 @@ cmd_detect(){
   printf '  %-14s: %s\n\n' "verdict" "$verdict"
 }
 
+wifi_qr_escape(){  # escape special chars for the WIFI: URI (ZXing spec)
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/;/\\;/g; s/,/\\,/g; s/:/\\:/g; s/"/\\"/g'
+}
+
 cmd_qr(){
-  # Print (and optionally save) a scannable QR code for the running hotspot.
+  # Print (and optionally save) a scannable QR code for the hotspot's SSID/PSK.
   # Usage: wifi-hotspot qr [output.png]
-  local out="${1:-}" psk wifi
+  local out="${1:-}" psk wifi ssid_e psk_e
   psk=$(get_psk)
   [ -n "$psk" ] || die "no PSK found (check $PSKFILE)"
-  wifi="WIFI:T:WPA;S:${SSID};P:${psk};H:false;;"
+  if ! is_running; then
+    echo "note: the hotspot does not appear to be running right now" >&2
+  fi
+  ssid_e=$(wifi_qr_escape "$SSID")
+  psk_e=$(wifi_qr_escape "$psk")
+  wifi="WIFI:T:WPA;S:${ssid_e};P:${psk_e};H:false;;"
   if ! command -v qrencode >/dev/null 2>&1; then
     echo "qrencode is not installed (install 'qrencode' to render a QR code)."
     echo "WiFi string: $wifi"
