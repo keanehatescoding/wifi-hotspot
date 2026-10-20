@@ -17,6 +17,7 @@ check:
 	@command -v hostapd  >/dev/null || { echo "missing: hostapd";  exit 1; }
 	@command -v dnsmasq  >/dev/null || { echo "missing: dnsmasq";  exit 1; }
 	@command -v iw       >/dev/null || { echo "missing: iw";       exit 1; }
+	@command -v qrencode >/dev/null 2>&1 || echo "optional: qrencode (needed for 'wifi-hotspot qr')"
 	@echo "dependencies OK"
 
 install:
