@@ -62,9 +62,14 @@ run_systemctl daemon-reload
 
 if [ -n "${SSID:-}" ] && [ -n "${COUNTRY:-}" ]; then
   run_systemctl enable --now wifi-hotspot.service
-  echo
-  echo "Installed. Status:"
-  "${DESTDIR:-}/usr/local/bin/wifi-hotspot" status || true
+  if [ -z "${DESTDIR:-}" ] || [ -n "${WIFI_HOTSPOT_FORCE_SYSTEMCTL:-}" ]; then
+    echo
+    echo "Installed. Status:"
+    "${DESTDIR:-}/usr/local/bin/wifi-hotspot" status || true
+  else
+    echo
+    echo "Installed (staged). Service was not started; run on the target host to enable it."
+  fi
 else
   run_systemctl enable wifi-hotspot.service
   echo

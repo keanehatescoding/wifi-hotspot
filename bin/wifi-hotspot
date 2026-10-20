@@ -971,3 +971,10 @@ if [ "${WIFI_HOTSPOT_TEST_MODE:-}" != "1" ]; then
     *)       usage; exit 1 ;;
   esac
 fi
+
+# Test-mode notice: when WIFI_HOTSPOT_TEST_MODE=1 the dispatch above is
+# skipped, so an invocation does nothing.  Make that visible on stderr so an
+# accidental no-op is not mistaken for success.
+if [ "${WIFI_HOTSPOT_TEST_MODE:-}" = "1" ]; then
+  printf '[wifi-hotspot] test mode: no action taken\n' >&2
+fi
