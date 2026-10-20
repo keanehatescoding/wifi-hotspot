@@ -22,8 +22,8 @@ set -euo pipefail
 # ---- defaults (override in /etc/wifi-hotspot.conf) -------------------------
 CLIENT="wlan0"
 AP="ap0"
-SSID="ArchHotspot"
-COUNTRY="KE"
+SSID="${SSID:-}"
+COUNTRY="${COUNTRY:-}"
 AP_ADDR="10.42.0.1"
 AP_PREFIX="24"
 DHCP_RANGE="10.42.0.10,10.42.0.200,12h"
@@ -33,6 +33,7 @@ P2P_BAND="bg"               # band for the Wi-Fi Direct group's own channel: bg 
 P2P_CHANNEL="auto"          # channel number for the group, or auto
 WPA_CTRL_DIR="/run/wpa_supplicant"
 SELF="$(readlink -f -- "$0")"
+VERSION="0.1.0"
 HW=g; CH=0; DFS=0
 MANAGE_FIREWALL=1           # set to 0 to leave the host firewall untouched
 NFT_TAG="wifi-hotspot"      # comment tag on the nftables rules we add
@@ -292,15 +293,22 @@ nft_rules_del(){
 }
 ensure_fw(){
   [ "$MANAGE_FIREWALL" = 1 ] || return 0
-  command -v sysctl >/dev/null 2>&1 && sysctl -qw net.ipv4.ip_forward=1 || true
+  # Remember the pre-existing ip_forward setting so `down` can restore it.
+  if command -v sysctl >/dev/null 2>&1; then
+    sysctl -n net.ipv4.ip_forward > /run/wifi-hotspot-ip_forward 2>/dev/null || true
+    sysctl -qw net.ipv4.ip_forward=1 || true
+  fi
   # iptables: plain-iptables hosts and the iptables-nft compat chains.
+  # Rules are tagged with $NFT_TAG so remove_fw only deletes what we added
+  # (pre-existing rules with the same spec are left untouched). NAT is
+  # restricted to the AP subnet so we do not masquerade unrelated traffic.
   if command -v iptables >/dev/null 2>&1; then
-    iptables -t nat -C POSTROUTING -o "$CLIENT" -j MASQUERADE 2>/dev/null || \
-      iptables -t nat -A POSTROUTING -o "$CLIENT" -j MASQUERADE
-    iptables -C FORWARD -i "$AP_IF" -o "$CLIENT" -j ACCEPT 2>/dev/null || \
-      iptables -A FORWARD -i "$AP_IF" -o "$CLIENT" -j ACCEPT
-    iptables -C FORWARD -i "$CLIENT" -o "$AP_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
-      iptables -A FORWARD -i "$CLIENT" -o "$AP_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+    iptables -t nat -C POSTROUTING -s "$AP_ADDR/$AP_PREFIX" -o "$CLIENT" -m comment --comment "$NFT_TAG" -j MASQUERADE 2>/dev/null || \
+      iptables -t nat -A POSTROUTING -s "$AP_ADDR/$AP_PREFIX" -o "$CLIENT" -m comment --comment "$NFT_TAG" -j MASQUERADE
+    iptables -C FORWARD -i "$AP_IF" -o "$CLIENT" -m comment --comment "$NFT_TAG" -j ACCEPT 2>/dev/null || \
+      iptables -A FORWARD -i "$AP_IF" -o "$CLIENT" -m comment --comment "$NFT_TAG" -j ACCEPT
+    iptables -C FORWARD -i "$CLIENT" -o "$AP_IF" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "$NFT_TAG" -j ACCEPT 2>/dev/null || \
+      iptables -A FORWARD -i "$CLIENT" -o "$AP_IF" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "$NFT_TAG" -j ACCEPT
   fi
   # nftables: also accept AP traffic in the native base chains.
   if nft_ok; then
@@ -312,9 +320,17 @@ ensure_fw(){
   fi
 }
 remove_fw(){
-  iptables -t nat -D POSTROUTING -o "$CLIENT" -j MASQUERADE 2>/dev/null || true
-  iptables -D FORWARD -i "$AP_IF" -o "$CLIENT" -j ACCEPT 2>/dev/null || true
-  iptables -D FORWARD -i "$CLIENT" -o "$AP_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+  # Restore ip_forward to whatever it was before `up`.
+  if [ -f /run/wifi-hotspot-ip_forward ]; then
+    sysctl -qw "net.ipv4.ip_forward=$(cat /run/wifi-hotspot-ip_forward)" 2>/dev/null || true
+    rm -f /run/wifi-hotspot-ip_forward
+  fi
+  # Only delete rules we tagged (pre-existing rules survive).
+  if command -v iptables >/dev/null 2>&1; then
+    iptables -t nat -D POSTROUTING -s "$AP_ADDR/$AP_PREFIX" -o "$CLIENT" -m comment --comment "$NFT_TAG" -j MASQUERADE 2>/dev/null || true
+    iptables -D FORWARD -i "$AP_IF" -o "$CLIENT" -m comment --comment "$NFT_TAG" -j ACCEPT 2>/dev/null || true
+    iptables -D FORWARD -i "$CLIENT" -o "$AP_IF" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "$NFT_TAG" -j ACCEPT 2>/dev/null || true
+  fi
   nft_rules_del
 }
 
@@ -522,8 +538,8 @@ p2p_forget(){ # $1 = network id; also drops wpa_supplicant's persistent copy
   wpa_out list_networks 2>/dev/null | awk -F'\t' \
       'NR>1 && $1 ~ /^[0-9]+$/ && $4 ~ /P2P-PERSISTENT/ {print $1}' \
     | while read -r id; do
-        got=$(wpa_out get_network "$id" ssid 2>/dev/null | tr -d '"' | tr 'A-Z' 'a-z' || true)
-        if [ "$got" = "$(printf '%s' "$SSID" | tr 'A-Z' 'a-z')" ] || [ "$got" = "$hex" ]; then
+        got=$(wpa_out get_network "$id" ssid 2>/dev/null | tr -d '"' | tr '[:upper:]' '[:lower:]' || true)
+        if [ "$got" = "$(printf '%s' "$SSID" | tr '[:upper:]' '[:lower:]')" ] || [ "$got" = "$hex" ]; then
           wpa_out remove_network "$id" >/dev/null 2>&1 || true
         fi
       done
@@ -664,10 +680,38 @@ remove_existing(){
 }
 
 # ---- commands --------------------------------------------------------------
+# ---- config validation -----------------------------------------------------
+require_ssid(){ [ -n "${SSID:-}" ] || die "SSID is not set; set SSID in /etc/wifi-hotspot.conf (e.g. SSID=\"MyHotspot\")"; }
+require_country(){ [ -n "${COUNTRY:-}" ] || die "COUNTRY is not set; set COUNTRY in /etc/wifi-hotspot.conf (ISO 3166-1 alpha-2, e.g. US, GB, DE) - a wrong code is a regulatory/compliance problem"; }
+
+# ---- locking ---------------------------------------------------------------
+# Serialize mutating operations (up/down/sync) across the dispatcher, the
+# systemd unit and manual invocations.
+lock_acquire(){
+  [ -n "${WIFI_HOTSPOT_NOLOCK:-}" ] && return 0
+  command -v flock >/dev/null 2>&1 || return 0
+  exec 9>/run/wifi-hotspot.lock
+  flock -n 9 || { echo "wifi-hotspot: another operation is in progress"; exit 0; }
+}
+
 cmd_up(){
+  require_ssid
+  require_country
   local freq
   freq=$(client_freq || true)
   [ -n "${freq:-}" ] || die "client '${CLIENT}' is not connected to Wi-Fi; AP channel unknown"
+  # Refuse to reuse the uplink's subnet for the AP (would break routing).
+  local cnet anet
+  cnet=$(ip -4 addr show dev "$CLIENT" 2>/dev/null | awk '/inet /{print $2; exit}')
+  anet="${AP_ADDR}/${AP_PREFIX}"
+  if [ -n "$cnet" ]; then
+    local cn an
+    cn=$(printf '%s' "${cnet%/*}" | cut -d. -f1-3)
+    an=$(printf '%s' "${AP_ADDR}" | cut -d. -f1-3)
+    if [ "$cn" = "$an" ]; then
+      die "AP subnet ($anet) overlaps the uplink subnet ($cnet); change AP_ADDR/AP_PREFIX in /etc/wifi-hotspot.conf"
+    fi
+  fi
   chan_band "$freq"
   if can_host_freq "$freq"; then CAN_HOST=1; else CAN_HOST=0; fi
   probe_caps
@@ -853,6 +897,7 @@ cmd_qr(){
   # Print (and optionally save) a scannable QR code for the hotspot's SSID/PSK.
   # Usage: wifi-hotspot qr [output.png]
   local out="${1:-}" psk wifi ssid_e psk_e
+  require_ssid
   psk=$(get_psk)
   [ -n "$psk" ] || die "no PSK found (check $PSKFILE)"
   if ! is_running; then
@@ -878,6 +923,7 @@ cmd_qr(){
 
 usage(){
   printf 'Usage: wifi-hotspot {up|down|restart|sync|status|detect|qr}\n' >&2
+  printf '       wifi-hotspot --version\n' >&2
   printf '       wifi-hotspot up [--mode auto|same|p2p]\n' >&2
   printf '       wifi-hotspot qr [output.png]\n' >&2
 }
@@ -896,6 +942,8 @@ parse_args(){ # skip the command word; accept --mode
 cmd="${1:-status}"
 case "$cmd" in up|restart|sync) parse_args "$@" ;; esac  # reject bad options before elevating
 case "$cmd" in up|down|restart|sync|qr) as_root "$@" ;; esac
+case "$cmd" in up|down|restart|sync) lock_acquire ;; esac
+case "$cmd" in up|down|restart|sync|qr) lock_acquire ;; esac
 case "$cmd" in
   up)      cmd_up ;;
   down)    cmd_down ;;
@@ -904,6 +952,7 @@ case "$cmd" in
   status)  cmd_status ;;
   detect)  cmd_detect ;;
   qr)      cmd_qr "${2:-}" ;;
+  --version|-V|version) echo "wifi-hotspot $VERSION"; exit 0 ;;
   -h|--help|help) usage; exit 0 ;;
   *)       usage; exit 1 ;;
 esac

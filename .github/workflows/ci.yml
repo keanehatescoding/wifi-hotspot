@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y shellcheck qrencode zbar-tools
+
+      - name: Syntax check (bash -n)
+        run: bash -n bin/wifi-hotspot
+
+      - name: ShellCheck
+        run: shellcheck -s bash -e SC1091,SC2016 bin/wifi-hotspot
+
+      - name: QR escape tests
+        run: tests/test_qr_escape.sh
