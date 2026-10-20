@@ -7,7 +7,12 @@ set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 
 install -Dm755 "$here/bin/wifi-hotspot"               /usr/local/bin/wifi-hotspot
-install -Dm644 "$here/config/wifi-hotspot.conf"       /etc/wifi-hotspot.conf
+if [ -f /etc/wifi-hotspot.conf ]; then
+  echo "keeping existing config: /etc/wifi-hotspot.conf"
+else
+  install -Dm644 "$here/config/wifi-hotspot.conf" /etc/wifi-hotspot.conf
+  echo "installed default config: /etc/wifi-hotspot.conf"
+fi
 install -Dm644 "$here/systemd/wifi-hotspot.service"   /etc/systemd/system/wifi-hotspot.service
 install -Dm755 "$here/NetworkManager/90-wifi-hotspot" /etc/NetworkManager/dispatcher.d/90-wifi-hotspot
 install -Dm644 "$here/man/wifi-hotspot.8"             /usr/local/share/man/man8/wifi-hotspot.8

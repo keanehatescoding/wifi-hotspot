@@ -161,8 +161,9 @@ Edit `/etc/wifi-hotspot.conf`:
 ```sh
 #CLIENT="wlan0"
 #AP="ap0"
-#SSID="ArchHotspot"
-#COUNTRY="KE"
+# SSID and COUNTRY are REQUIRED (no defaults are shipped on purpose).
+#SSID="MyHotspot"
+#COUNTRY="US"   # ISO 3166-1 alpha-2, e.g. US, GB, DE, KE
 #AP_ADDR="10.42.0.1"
 #AP_PREFIX="24"
 #DHCP_RANGE="10.42.0.10,10.42.0.200,12h"

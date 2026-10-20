@@ -295,7 +295,7 @@ ensure_fw(){
   [ "$MANAGE_FIREWALL" = 1 ] || return 0
   # Remember the pre-existing ip_forward setting so `down` can restore it.
   if command -v sysctl >/dev/null 2>&1; then
-    sysctl -n net.ipv4.ip_forward > /run/wifi-hotspot-ip_forward 2>/dev/null || true
+    [ -f /run/wifi-hotspot-ip_forward ] || sysctl -n net.ipv4.ip_forward > /run/wifi-hotspot-ip_forward 2>/dev/null || true
     sysctl -qw net.ipv4.ip_forward=1 || true
   fi
   # iptables: plain-iptables hosts and the iptables-nft compat chains.
@@ -401,7 +401,7 @@ ensure_net(){
       --dhcp-option=3,"$AP_ADDR" --dhcp-option=6,"$AP_ADDR" \
       --dhcp-authoritative \
       --dhcp-leasefile="${RUN_DIR}/dnsmasq-${AP}.leases" \
-      --pid-file="$DPID" --conf-file=/dev/null
+      --pid-file="$DPID" --conf-file=/dev/null 9>&-
   fi
 }
 
@@ -439,7 +439,7 @@ up_same(){
   ip link set dev "$AP" up
 
   write_conf
-  hostapd -B -P "$HPID" "$CONF"
+  hostapd -B -P "$HPID" "$CONF" 9>&-
   sleep 1
   is_running || die "hostapd failed to start (check: journalctl -u wifi-hotspot)"
   save_state "MODE=same" "AP_IF=$AP"
@@ -691,7 +691,10 @@ lock_acquire(){
   [ -n "${WIFI_HOTSPOT_NOLOCK:-}" ] && return 0
   command -v flock >/dev/null 2>&1 || return 0
   exec 9>/run/wifi-hotspot.lock
-  flock -n 9 || { echo "wifi-hotspot: another operation is in progress"; exit 0; }
+  if ! flock -w 10 9; then
+    echo "wifi-hotspot: another operation is in progress (lock timeout)" >&2
+    exit 1
+  fi
 }
 
 cmd_up(){
@@ -943,7 +946,6 @@ cmd="${1:-status}"
 case "$cmd" in up|restart|sync) parse_args "$@" ;; esac  # reject bad options before elevating
 case "$cmd" in up|down|restart|sync|qr) as_root "$@" ;; esac
 case "$cmd" in up|down|restart|sync) lock_acquire ;; esac
-case "$cmd" in up|down|restart|sync|qr) lock_acquire ;; esac
 case "$cmd" in
   up)      cmd_up ;;
   down)    cmd_down ;;

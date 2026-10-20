@@ -7,9 +7,17 @@ Wants=NetworkManager-wait-online.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=-/usr/local/bin/wifi-hotspot up
+ExecStart=/usr/local/bin/wifi-hotspot up
 ExecStop=/usr/local/bin/wifi-hotspot down
 TimeoutStartSec=120
+# Hardening (the service still needs CAP_NET_ADMIN etc. via the binary).
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
 
 [Install]
 WantedBy=multi-user.target

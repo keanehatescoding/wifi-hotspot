@@ -1,7 +1,20 @@
 #!/bin/sh
 # NetworkManager dispatcher: keep the same-channel Wi-Fi hotspot in sync with
 # the Wi-Fi client uplink.  Runs as root; started by NetworkManager directly.
-CLIENT="${WIFI_HOTSPOT_CLIENT:-wlan0}"
+#
+# Read the user's configuration so a custom CLIENT= (or any other override in
+# /etc/wifi-hotspot.conf) is honoured instead of silently defaulting to wlan0.
+[ -r /etc/wifi-hotspot.conf ] && . /etc/wifi-hotspot.conf
+
+# If CLIENT is unset, accept the interface NM is reporting when it is wireless.
+if [ -z "${CLIENT:-}" ]; then
+  if [ -d "/sys/class/net/$1/phy80211" ] || [ -d "/sys/class/net/$1/wireless" ]; then
+    CLIENT="$1"
+  else
+    exit 0
+  fi
+fi
+
 [ "$1" = "$CLIENT" ] || exit 0
 case "$2" in
   up|dhcp4-change|connectivity-change) exec /usr/local/bin/wifi-hotspot sync ;;

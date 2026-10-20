@@ -22,7 +22,12 @@ check:
 
 install:
 	install -Dm755 bin/wifi-hotspot                         $(BINDIR)/wifi-hotspot
-	install -Dm644 config/wifi-hotspot.conf                 $(DESTDIR)$(SYSCONFDIR)/wifi-hotspot.conf
+	@if [ -f $(DESTDIR)$(SYSCONFDIR)/wifi-hotspot.conf ]; then \
+	  echo "keeping existing config: $(DESTDIR)$(SYSCONFDIR)/wifi-hotspot.conf"; \
+	else \
+	  install -Dm644 config/wifi-hotspot.conf $(DESTDIR)$(SYSCONFDIR)/wifi-hotspot.conf; \
+	  echo "installed default config: $(DESTDIR)$(SYSCONFDIR)/wifi-hotspot.conf"; \
+	fi
 	install -Dm644 systemd/wifi-hotspot.service             $(UNITDIR)/wifi-hotspot.service
 	install -Dm755 NetworkManager/90-wifi-hotspot           $(DISPDIR)/90-wifi-hotspot
 	install -Dm644 man/wifi-hotspot.8                       $(MANDIR)/man8/wifi-hotspot.8

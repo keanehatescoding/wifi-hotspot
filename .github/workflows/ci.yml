@@ -14,10 +14,19 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck qrencode zbar-tools
 
       - name: Syntax check (bash -n)
-        run: bash -n bin/wifi-hotspot
+        run: |
+          bash -n bin/wifi-hotspot
+          bash -n install.sh
+          sh -n NetworkManager/90-wifi-hotspot
 
       - name: ShellCheck
-        run: shellcheck -s bash -e SC1091,SC2016 bin/wifi-hotspot
+        run: |
+          shellcheck -s bash -e SC1091,SC2016 bin/wifi-hotspot
+          shellcheck -s sh -e SC1091 NetworkManager/90-wifi-hotspot
+          shellcheck -s sh install.sh
 
       - name: QR escape tests
         run: tests/test_qr_escape.sh
+
+      - name: Lock inheritance test
+        run: tests/test_lock.sh
