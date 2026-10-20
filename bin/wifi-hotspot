@@ -73,7 +73,15 @@ as_root(){
 #   * which channels a network may be *started* on,
 #   * what the client is tuned to right now.
 client_phy(){ iw dev "$CLIENT" info 2>/dev/null | awk '/wiphy/{print "phy"$2; exit}'; }
-iw_phy_info(){ iw phy "$(client_phy)" info 2>/dev/null; }
+iw_phy_info(){
+  # Allow feeding a captured `iw phy info` sample (for testing/debugging)
+  # via WIFI_HOTSPOT_IW_PHY_FILE, so the awk parsers can be exercised
+  # without real hardware.
+  if [ -n "${WIFI_HOTSPOT_IW_PHY_FILE:-}" ] && [ -r "$WIFI_HOTSPOT_IW_PHY_FILE" ]; then
+    cat "$WIFI_HOTSPOT_IW_PHY_FILE"; return 0
+  fi
+  iw phy "$(client_phy)" info 2>/dev/null
+}
 
 # For each "valid interface combination": APSTA P2PGO CHANNELS TOTAL
 # APSTA/P2PGO are 1 when that type can exist *together with* a client, per the

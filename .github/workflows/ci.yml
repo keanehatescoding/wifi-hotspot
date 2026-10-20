@@ -33,3 +33,6 @@ jobs:
 
       - name: Lock inheritance test
         run: tests/test_lock.sh
+
+      - name: iw parsing tests
+        run: tests/test_iw_parse.sh
