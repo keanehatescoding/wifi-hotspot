@@ -76,4 +76,19 @@ echo "$out" | grep -q "radar detection" && { echo "FAIL: 5180 should not be DFS"
 echo "ok: DFS detection matches iw flags"
 
 echo
+echo "=== real functions via WIFI_HOTSPOT_IW_PHY_FILE hook ==="
+out=$(WIFI_HOTSPOT_TEST_MODE=1 WIFI_HOTSPOT_IW_PHY_FILE="$SAMPLE" bash -c '
+  set -euo pipefail
+  source "'"$SRC"'"
+  chan_band 5745; echo "DFS_5745=$DFS"
+  chan_band 5180; echo "DFS_5180=$DFS"
+  printf "RANGES=%s\n" "$(host_ranges)"
+')
+echo "$out"
+grep -q '^DFS_5745=1$' <<< "$out" || { echo "FAIL: chan_band should flag 5745 as DFS"; exit 1; }
+grep -q '^DFS_5180=0$' <<< "$out" || { echo "FAIL: chan_band should not flag 5180 as DFS"; exit 1; }
+grep -q '^RANGES=2\.4 GHz 1-13, 5 GHz 36-48, 5 GHz 52-64 (DFS), 5 GHz 100-165 (DFS)$' <<< "$out"   || { echo "FAIL: host_ranges mismatch: $(grep ^RANGES= <<< "$out")"; exit 1; }
+echo "ok: chan_band and host_ranges agree with kernel flags"
+
+echo
 echo "=== ALL IW PARSE TESTS PASSED ==="

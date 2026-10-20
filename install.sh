@@ -36,10 +36,14 @@ if [ -z "${DESTDIR:-}" ]; then
   chown root:root /etc/NetworkManager/dispatcher.d/90-wifi-hotspot
 fi
 
-# systemctl is invoked unless WIFI_HOTSPOT_NO_SYSTEMCTL is set, so staging a
-# package (DESTDIR=...) can skip it without losing the calls in tests.
+# systemctl is skipped when staging (DESTDIR set) unless the caller opts in
+# via WIFI_HOTSPOT_FORCE_SYSTEMCTL=1 (used by the test harness to keep
+# observing the calls).  WIFI_HOTSPOT_NO_SYSTEMCTL always skips.
 run_systemctl() {
   [ -n "${WIFI_HOTSPOT_NO_SYSTEMCTL:-}" ] && return 0
+  if [ -n "${DESTDIR:-}" ] && [ -z "${WIFI_HOTSPOT_FORCE_SYSTEMCTL:-}" ]; then
+    return 0
+  fi
   systemctl "$@"
 }
 

@@ -57,7 +57,7 @@ run_case() {
 
   # Run installer
   set +e
-  DESTDIR="$root" PATH="$STUBDIR:$PATH" sh "$HERE/install.sh" >"$TMPROOT/out_$name.txt" 2>&1
+  DESTDIR="$root" WIFI_HOTSPOT_FORCE_SYSTEMCTL=1 PATH="$STUBDIR:$PATH" sh "$HERE/install.sh" >"$TMPROOT/out_$name.txt" 2>&1
   local rc=$?
   set -e
 
@@ -117,7 +117,7 @@ printf '%s\n' "$cfg" > "$root/etc/wifi-hotspot.conf"
 orig=$(md5sum < "$root/etc/wifi-hotspot.conf")
 export DESTDIR="$root"
 : > "$STUB_LOG"
-DESTDIR="$root" PATH="$STUBDIR:$PATH" sh "$HERE/install.sh" >$TMPROOT/out_upgrade.txt 2>&1
+DESTDIR="$root" WIFI_HOTSPOT_FORCE_SYSTEMCTL=1 PATH="$STUBDIR:$PATH" sh "$HERE/install.sh" >$TMPROOT/out_upgrade.txt 2>&1
 rc=$?
 new=$(md5sum < "$root/etc/wifi-hotspot.conf")
 if [ "$rc" -ne 0 ]; then echo "  [upgrade] FAIL: exit $rc"; FAIL=1
@@ -134,7 +134,7 @@ COUNTRY="US"
 export DESTDIR="$root"
 : > "$STUB_LOG"
 set +e
-DESTDIR="$root" WIFI_HOTSPOT_NO_SYSTEMCTL=1 PATH="$STUBDIR:$PATH" sh "$HERE/install.sh" >"$TMPROOT/out_staged.txt" 2>&1
+DESTDIR="$root" PATH="$STUBDIR:$PATH" sh "$HERE/install.sh" >"$TMPROOT/out_staged.txt" 2>&1
 rc=$?
 set -e
 if [ "$rc" -ne 0 ]; then echo "  [staged] FAIL: exit $rc"; FAIL=1
@@ -148,7 +148,7 @@ printf 'SSID="unterminated\nCOUNTRY="KE"\n' > "$root/etc/wifi-hotspot.conf"
 export DESTDIR="$root"
 : > "$STUB_LOG"
 set +e
-DESTDIR="$root" PATH="$STUBDIR:$PATH" sh "$HERE/install.sh" >$TMPROOT/out_malformed.txt 2>&1
+DESTDIR="$root" WIFI_HOTSPOT_FORCE_SYSTEMCTL=1 PATH="$STUBDIR:$PATH" sh "$HERE/install.sh" >$TMPROOT/out_malformed.txt 2>&1
 rc=$?
 set -e
 if [ "$rc" -eq 0 ]; then echo "  [malformed] FAIL: expected non-zero exit"; FAIL=1

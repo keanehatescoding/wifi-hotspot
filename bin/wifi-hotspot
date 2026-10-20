@@ -953,19 +953,21 @@ parse_args(){ # skip the command word; accept --mode
   case "$MODE" in auto|same|p2p) ;; *) die "MODE must be auto, same or p2p (got '$MODE')" ;; esac
 }
 
-cmd="${1:-status}"
-case "$cmd" in up|restart|sync) parse_args "$@" ;; esac  # reject bad options before elevating
-case "$cmd" in up|down|restart|sync|qr) as_root "$@" ;; esac
-case "$cmd" in up|down|restart|sync) lock_acquire ;; esac
-case "$cmd" in
-  up)      cmd_up ;;
-  down)    cmd_down ;;
-  restart) cmd_down; cmd_up ;;
-  sync)    cmd_sync ;;
-  status)  cmd_status ;;
-  detect)  cmd_detect ;;
-  qr)      cmd_qr "${2:-}" ;;
-  --version|-V|version) echo "wifi-hotspot $VERSION"; exit 0 ;;
-  -h|--help|help) usage; exit 0 ;;
-  *)       usage; exit 1 ;;
-esac
+if [ "${WIFI_HOTSPOT_TEST_MODE:-}" != "1" ]; then
+  cmd="${1:-status}"
+  case "$cmd" in up|restart|sync) parse_args "$@" ;; esac  # reject bad options before elevating
+  case "$cmd" in up|down|restart|sync|qr) as_root "$@" ;; esac
+  case "$cmd" in up|down|restart|sync) lock_acquire ;; esac
+  case "$cmd" in
+    up)      cmd_up ;;
+    down)    cmd_down ;;
+    restart) cmd_down; cmd_up ;;
+    sync)    cmd_sync ;;
+    status)  cmd_status ;;
+    detect)  cmd_detect ;;
+    qr)      cmd_qr "${2:-}" ;;
+    --version|-V|version) echo "wifi-hotspot $VERSION"; exit 0 ;;
+    -h|--help|help) usage; exit 0 ;;
+    *)       usage; exit 1 ;;
+  esac
+fi
