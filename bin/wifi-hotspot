@@ -36,7 +36,9 @@ SELF="$(readlink -f -- "$0")"
 VERSION="0.1.10"
 HW=g; CH=0; DFS=0
 MANAGE_FIREWALL=1           # set to 0 to leave the host firewall untouched
+FIREWALL_BACKEND="auto"     # auto | raw | firewalld | ufw
 NFT_TAG="wifi-hotspot"      # comment tag on the nftables rules we add
+SECURITY="wpa2"             # wpa2 | wpa3 | mixed (WPA2+WPA3 transition)
 [ -r /etc/wifi-hotspot.conf ] && . /etc/wifi-hotspot.conf
 
 CONF="/etc/hostapd/${AP}.conf"
@@ -300,13 +302,22 @@ nft_rules_del(){
       | while read -r h; do nft delete rule ip filter "$ch" handle "$h" 2>/dev/null || true; done
   done
 }
-ensure_fw(){
-  [ "$MANAGE_FIREWALL" = 1 ] || return 0
-  # Remember the pre-existing ip_forward setting so `down` can restore it.
-  if command -v sysctl >/dev/null 2>&1; then
-    [ -f /run/wifi-hotspot-ip_forward ] || sysctl -n net.ipv4.ip_forward > /run/wifi-hotspot-ip_forward 2>/dev/null || true
-    sysctl -qw net.ipv4.ip_forward=1 || true
+firewall_backend(){
+  # Allow an explicit override from config.
+  case "${FIREWALL_BACKEND:-auto}" in
+    raw|firewalld|ufw) echo "${FIREWALL_BACKEND}"; return ;;
+  esac
+  # Auto-detect: prefer native front-ends when they are active.
+  if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+    echo firewalld; return
   fi
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi 'Status: active'; then
+    echo ufw; return
+  fi
+  echo raw
+}
+
+ensure_fw_raw(){
   # iptables: plain-iptables hosts and the iptables-nft compat chains.
   # Rules are tagged with $NFT_TAG so remove_fw only deletes what we added
   # (pre-existing rules with the same spec are left untouched). NAT is
@@ -328,19 +339,74 @@ ensure_fw(){
     nft_rule_add FORWARD oifname "$AP_IF"
   fi
 }
-remove_fw(){
-  # Restore ip_forward to whatever it was before `up`.
-  if [ -f /run/wifi-hotspot-ip_forward ]; then
-    sysctl -qw "net.ipv4.ip_forward=$(cat /run/wifi-hotspot-ip_forward)" 2>/dev/null || true
-    rm -f /run/wifi-hotspot-ip_forward
+
+ensure_fw_firewalld(){
+  # Use firewalld's own CLI so we do not fight it for ruleset ownership.
+  firewall-cmd --add-masquerade >/dev/null 2>&1 || true
+  firewall-cmd --direct --add-rule ipv4 nat POSTROUTING 0 -s "$AP_ADDR/$AP_PREFIX" -o "$CLIENT" -j MASQUERADE >/dev/null 2>&1 || true
+  firewall-cmd --direct --add-rule ipv4 filter FORWARD 0 -i "$AP_IF" -o "$CLIENT" -j ACCEPT >/dev/null 2>&1 || true
+  firewall-cmd --direct --add-rule ipv4 filter FORWARD 0 -i "$CLIENT" -o "$AP_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT >/dev/null 2>&1 || true
+  firewall-cmd --direct --add-rule ipv4 filter INPUT 0 -i "$AP_IF" -j ACCEPT >/dev/null 2>&1 || true
+}
+
+ensure_fw_ufw(){
+  # ufw has no runtime NAT; only the filter rules can be added here.
+  ufw allow in on "$AP_IF" >/dev/null 2>&1 || true
+  ufw route allow in on "$AP_IF" out on "$CLIENT" >/dev/null 2>&1 || true
+  log "ufw: runtime NAT/masquerade is not supported by ufw; add a MASQUERADE rule to /etc/ufw/before.rules or set MANAGE_FIREWALL=0"
+}
+
+ensure_fw(){
+  [ "$MANAGE_FIREWALL" = 1 ] || return 0
+  # Remember the pre-existing ip_forward setting so `down` can restore it.
+  if command -v sysctl >/dev/null 2>&1; then
+    [ -f /run/wifi-hotspot-ip_forward ] || sysctl -n net.ipv4.ip_forward > /run/wifi-hotspot-ip_forward 2>/dev/null || true
+    sysctl -qw net.ipv4.ip_forward=1 || true
   fi
-  # Only delete rules we tagged (pre-existing rules survive).
+  local backend; backend=$(firewall_backend)
+  printf '%s' "$backend" > /run/wifi-hotspot-fw-backend 2>/dev/null || true
+  log "firewall backend: $backend"
+  case "$backend" in
+    firewalld) ensure_fw_firewalld ;;
+    ufw)       ensure_fw_ufw ;;
+    *)         ensure_fw_raw ;;
+  esac
+}
+remove_fw_raw(){
   if command -v iptables >/dev/null 2>&1; then
     iptables -t nat -D POSTROUTING -s "$AP_ADDR/$AP_PREFIX" -o "$CLIENT" -m comment --comment "$NFT_TAG" -j MASQUERADE 2>/dev/null || true
     iptables -D FORWARD -i "$AP_IF" -o "$CLIENT" -m comment --comment "$NFT_TAG" -j ACCEPT 2>/dev/null || true
     iptables -D FORWARD -i "$CLIENT" -o "$AP_IF" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "$NFT_TAG" -j ACCEPT 2>/dev/null || true
   fi
   nft_rules_del
+}
+
+remove_fw_firewalld(){
+  firewall-cmd --remove-masquerade >/dev/null 2>&1 || true
+  firewall-cmd --direct --remove-rule ipv4 nat POSTROUTING 0 -s "$AP_ADDR/$AP_PREFIX" -o "$CLIENT" -j MASQUERADE >/dev/null 2>&1 || true
+  firewall-cmd --direct --remove-rule ipv4 filter FORWARD 0 -i "$AP_IF" -o "$CLIENT" -j ACCEPT >/dev/null 2>&1 || true
+  firewall-cmd --direct --remove-rule ipv4 filter FORWARD 0 -i "$CLIENT" -o "$AP_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT >/dev/null 2>&1 || true
+  firewall-cmd --direct --remove-rule ipv4 filter INPUT 0 -i "$AP_IF" -j ACCEPT >/dev/null 2>&1 || true
+}
+
+remove_fw_ufw(){
+  ufw delete allow in on "$AP_IF" >/dev/null 2>&1 || true
+  ufw route delete allow in on "$AP_IF" out on "$CLIENT" >/dev/null 2>&1 || true
+}
+
+remove_fw(){
+  # Restore ip_forward to whatever it was before `up`.
+  if [ -f /run/wifi-hotspot-ip_forward ]; then
+    sysctl -qw "net.ipv4.ip_forward=$(cat /run/wifi-hotspot-ip_forward)" 2>/dev/null || true
+    rm -f /run/wifi-hotspot-ip_forward
+  fi
+  local backend; backend=$(cat /run/wifi-hotspot-fw-backend 2>/dev/null || firewall_backend)
+  rm -f /run/wifi-hotspot-fw-backend
+  case "$backend" in
+    firewalld) remove_fw_firewalld ;;
+    ufw)       remove_fw_ufw ;;
+    *)         remove_fw_raw ;;
+  esac
 }
 
 # ---- state -----------------------------------------------------------------
@@ -382,9 +448,26 @@ write_conf(){
     printf 'auth_algs=1\n'
     printf 'ignore_broadcast_ssid=0\n'
     printf 'wpa=2\n'
-    printf 'wpa_passphrase=%s\n' "$psk"
-    printf 'wpa_key_mgmt=WPA-PSK\n'
-    printf 'rsn_pairwise=CCMP\n'
+    case "${SECURITY:-wpa2}" in
+      wpa3)
+        printf 'wpa_key_mgmt=SAE\n'
+        printf 'rsn_pairwise=CCMP\n'
+        printf 'ieee80211w=2\n'          # PMF required for WPA3
+        printf 'sae_password=%s\n' "$psk"
+        ;;
+      mixed)
+        printf 'wpa_passphrase=%s\n' "$psk"
+        printf 'wpa_key_mgmt=WPA-PSK SAE\n'
+        printf 'rsn_pairwise=CCMP\n'
+        printf 'ieee80211w=1\n'          # PMF optional (transition mode)
+        printf 'sae_password=%s\n' "$psk"
+        ;;
+      *)  # wpa2 (default)
+        printf 'wpa_passphrase=%s\n' "$psk"
+        printf 'wpa_key_mgmt=WPA-PSK\n'
+        printf 'rsn_pairwise=CCMP\n'
+        ;;
+    esac
     if [ "$HW" = a ]; then
       printf 'ieee80211ac=1\n'
       # 802.11h (DFS radar detection + TPC) is only needed on DFS channels
@@ -927,7 +1010,11 @@ cmd_qr(){
   fi
   printf 'SSID:     %s\n' "$SSID"
   printf 'Password: %s\n' "$psk"
-  printf 'Security: WPA2 (WPA-PSK)\n'
+  case "${SECURITY:-wpa2}" in
+    wpa3)   printf 'Security: WPA3 (SAE)\n' ;;
+    mixed)  printf 'Security: WPA2+WPA3 (transition)\n' ;;
+    *)      printf 'Security: WPA2 (WPA-PSK)\n' ;;
+  esac
   if [ -n "$out" ]; then
     qrencode -o "$out" -s 8 -m 2 "$wifi" && printf 'saved: %s\n' "$out"
   fi
