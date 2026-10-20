@@ -2,7 +2,7 @@
 # Convenience installer: copies files and enables the systemd unit.
 set -eu
 
-[ "$(id -u)" -eq 0 ] || { echo "run as root (sudo ./install.sh)"; exit 1; }
+[ -n "${DESTDIR:-}" ] || [ "$(id -u)" -eq 0 ] || { echo "run as root (sudo ./install.sh)"; exit 1; }
 
 here="$(cd "$(dirname "$0")" && pwd)"
 
@@ -11,11 +11,15 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # source in a subshell so a syntax error in the config can't kill this shell
 # (dash exits the whole shell on a sourced syntax error).
 if [ -r "${DESTDIR:-}/etc/wifi-hotspot.conf" ]; then
+  # Validate in a subshell (so a syntax error can't kill this shell), then
+  # source in the main shell so SSID/COUNTRY are available below.
   # shellcheck disable=SC1091
   if ! ( . "${DESTDIR:-}/etc/wifi-hotspot.conf" ) >/dev/null 2>&1; then
     echo "error: ${DESTDIR:-}/etc/wifi-hotspot.conf has a syntax error" >&2
     exit 1
   fi
+  # shellcheck disable=SC1091
+  . "${DESTDIR:-}/etc/wifi-hotspot.conf"
 fi
 
 install -Dm755 "$here/bin/wifi-hotspot"               "${DESTDIR:-}/usr/local/bin/wifi-hotspot"
@@ -32,36 +36,33 @@ if [ -z "${DESTDIR:-}" ]; then
   chown root:root /etc/NetworkManager/dispatcher.d/90-wifi-hotspot
 fi
 
+# systemctl is invoked unless WIFI_HOTSPOT_NO_SYSTEMCTL is set, so staging a
+# package (DESTDIR=...) can skip it without losing the calls in tests.
+run_systemctl() {
+  [ -n "${WIFI_HOTSPOT_NO_SYSTEMCTL:-}" ] && return 0
+  systemctl "$@"
+}
+
 # Source the (possibly freshly installed) config to see whether the two
 # required settings are present.  Do not start the service on a default
 # config: with SSID/COUNTRY unset `up` fails and `enable --now` would
 # abort this installer under `set -e` before printing any guidance.
 SSID=""; COUNTRY=""
 if [ -r "${DESTDIR:-}/etc/wifi-hotspot.conf" ]; then
+  # Already validated above; source in the main shell for SSID/COUNTRY.
   # shellcheck disable=SC1091
-  if ! ( . "${DESTDIR:-}/etc/wifi-hotspot.conf" ) >/dev/null 2>&1; then
-    echo "error: ${DESTDIR:-}/etc/wifi-hotspot.conf has a syntax error" >&2
-    exit 1
-  fi
+  . "${DESTDIR:-}/etc/wifi-hotspot.conf" 2>/dev/null || true
 fi
 
-if [ -z "${DESTDIR:-}" ]; then
-  systemctl daemon-reload
-fi
+run_systemctl daemon-reload
 
 if [ -n "${SSID:-}" ] && [ -n "${COUNTRY:-}" ]; then
-  if [ -z "${DESTDIR:-}" ]; then
-    systemctl enable --now wifi-hotspot.service
-    echo
-    echo "Installed. Status:"
-    /usr/local/bin/wifi-hotspot status || true
-  else
-    echo "Installed (staged). Enable/start on the target system after setting SSID and COUNTRY."
-  fi
+  run_systemctl enable --now wifi-hotspot.service
+  echo
+  echo "Installed. Status:"
+  "${DESTDIR:-}/usr/local/bin/wifi-hotspot" status || true
 else
-  if [ -z "${DESTDIR:-}" ]; then
-    systemctl enable wifi-hotspot.service
-  fi
+  run_systemctl enable wifi-hotspot.service
   echo
   echo "Installed, but NOT started: SSID and COUNTRY are not set yet."
   echo "Edit /etc/wifi-hotspot.conf to set SSID and COUNTRY (ISO 3166-1 alpha-2),"

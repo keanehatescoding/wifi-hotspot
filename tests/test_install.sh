@@ -5,15 +5,8 @@
 # stub systemctl, covering every config state the installer can encounter.
 set -euo pipefail
 
-if [ "$(id -u)" -ne 0 ]; then
-  if sudo -n true 2>/dev/null; then
-    exec sudo -E bash "$0" "$@"
-  else
-    echo "SKIP: test_install.sh needs root (run with: sudo bash tests/test_install.sh)"
-    exit 0
-  fi
-fi
-
+# Runs as the current user; systemctl and chown are stubbed below, and
+# DESTDIR redirects all file writes into a throwaway tree.
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 TMPROOT="$(mktemp -d /tmp/whtest-install.XXXXXX)"
 trap 'rm -rf "$TMPROOT"' EXIT
@@ -22,6 +15,13 @@ STUBDIR="$TMPROOT/stubbin"
 mkdir -p "$STUBDIR"
 STUB_LOG="$TMPROOT/systemctl.log"
 : > "$STUB_LOG"
+
+# Stub chown: no-op (real chown needs root; harmless to skip in tests).
+cat > "$STUBDIR/chown" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+chmod +x "$STUBDIR/chown"
 
 # Stub systemctl: records every invocation, always succeeds.
 cat > "$STUBDIR/systemctl" <<'STUB'
@@ -125,7 +125,23 @@ elif [ "$orig" != "$new" ]; then echo "  [upgrade] FAIL: config was modified"; F
 elif ! grep -q "Installed. Status:" $TMPROOT/out_upgrade.txt; then echo "  [upgrade] FAIL: no status"; FAIL=1
 else echo "  [upgrade] PASS"; fi
 
-# Case 6: malformed config -> non-zero exit, error message
+# Case 6: staged install (switch set) -> no systemctl calls at all
+root="$TMPROOT/case_staged"
+mkdir -p "$root/etc"
+printf 'SSID="Staged"
+COUNTRY="US"
+' > "$root/etc/wifi-hotspot.conf"
+export DESTDIR="$root"
+: > "$STUB_LOG"
+set +e
+DESTDIR="$root" WIFI_HOTSPOT_NO_SYSTEMCTL=1 PATH="$STUBDIR:$PATH" sh "$HERE/install.sh" >"$TMPROOT/out_staged.txt" 2>&1
+rc=$?
+set -e
+if [ "$rc" -ne 0 ]; then echo "  [staged] FAIL: exit $rc"; FAIL=1
+elif [ -s "$STUB_LOG" ]; then echo "  [staged] FAIL: systemctl was called: $(cat "$STUB_LOG")"; FAIL=1
+else echo "  [staged] PASS (no systemctl calls)"; fi
+
+# Case 7: malformed config -> non-zero exit, error message
 root="$TMPROOT/case_malformed"
 mkdir -p "$root/etc"
 printf 'SSID="unterminated\nCOUNTRY="KE"\n' > "$root/etc/wifi-hotspot.conf"
