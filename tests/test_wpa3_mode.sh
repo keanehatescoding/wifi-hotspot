@@ -65,7 +65,6 @@ else
   echo "  FAIL: gate broken: $out"; FAIL=1
 fi
 
-if [ "$FAIL" = "1" ]; then echo "=== TESTS FAILED ==="; exit 1; fi
 # 4. cmd_up error message for wpa3 on an unhostable uplink.
 set +e
 out=$(WIFI_HOTSPOT_TEST_MODE=1 WIFI_HOTSPOT_SECURITY=wpa3 bash -c '

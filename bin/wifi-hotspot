@@ -835,7 +835,7 @@ cmd_up(){
   # NOTE: heuristic compares the first three octets (/24); accurate for the
   # common case. Use ipcalc for unusual prefixes.
   local cnet anet
-  cnet=$(ip -4 addr show dev "$CLIENT" 2>/dev/null | awk '/inet /{print $2; exit}')
+  cnet=$(ip -4 addr show dev "$CLIENT" 2>/dev/null | awk '/inet /{print $2; exit}') || true
   anet="${AP_ADDR}/${AP_PREFIX}"
   if [ -n "$cnet" ]; then
     local cn an
