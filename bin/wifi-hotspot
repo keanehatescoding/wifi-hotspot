@@ -40,6 +40,7 @@ FIREWALL_BACKEND="${WIFI_HOTSPOT_FIREWALL_BACKEND:-${FIREWALL_BACKEND:-auto}}" #
 NFT_TAG="wifi-hotspot"      # comment tag on the nftables rules we add
 SECURITY="${WIFI_HOTSPOT_SECURITY:-${SECURITY:-wpa2}}" # wpa2 | wpa3 | mixed (WPA2+WPA3 transition)
 CONF_PATH="${WIFI_HOTSPOT_CONF:-/etc/wifi-hotspot.conf}"
+# shellcheck disable=SC1090
 [ -r "$CONF_PATH" ] && . "$CONF_PATH"
 
 CONF="${WIFI_HOTSPOT_CONF_HOSTAPD:-/etc/hostapd/${AP}.conf}"
