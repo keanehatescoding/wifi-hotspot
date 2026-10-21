@@ -3,6 +3,8 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$HERE/bin/wifi-hotspot"
+SAMPLE="$HERE/tests/samples/iw-phy-rtl8852be.txt"
+export WIFI_HOTSPOT_IW_PHY_FILE="$SAMPLE"
 FAIL=0
 
 echo "=== test_wpa3_mode.sh ==="
@@ -61,6 +63,28 @@ if [ "$out" = "CONF_PATH=/nonexistent/path.conf" ]; then
   echo "  ok: path override applies in TEST_MODE"
 else
   echo "  FAIL: gate broken: $out"; FAIL=1
+fi
+
+if [ "$FAIL" = "1" ]; then echo "=== TESTS FAILED ==="; exit 1; fi
+# 4. cmd_up error message for wpa3 on an unhostable uplink.
+set +e
+out=$(WIFI_HOTSPOT_TEST_MODE=1 WIFI_HOTSPOT_SECURITY=wpa3 bash -c '
+  source "'"$SRC"'"
+  SSID="TestNet"; COUNTRY="US"; SECURITY="wpa3"
+  client_freq(){ echo 2484; }
+  probe_caps(){ CAP_APSTA=1; CAP_P2PGO=1; CAP_APSTA_CH=1; CAP_P2P_CH=2; }
+  p2p_ready(){ return 0; }
+  p2p_status(){ echo ok; }
+  p2p_reason(){ echo "$1"; }
+  chan_band(){ :; }
+  can_host_freq(){ return 1; }
+  cmd_up
+' 2>&1)
+set -e
+if echo "$out" | grep -q "connect on a channel that can host an AP, or set SECURITY=mixed or wpa2"; then
+  echo "  ok: cmd_up wpa3 error message"
+else
+  echo "  FAIL: wrong error message: $out"; FAIL=1
 fi
 
 if [ "$FAIL" = "1" ]; then echo "=== TESTS FAILED ==="; exit 1; fi
