@@ -35,14 +35,15 @@ WPA_CTRL_DIR="/run/wpa_supplicant"
 SELF="$(readlink -f -- "$0")"
 VERSION="0.2.1"
 HW=g; CH=0; DFS=0
-MANAGE_FIREWALL="${MANAGE_FIREWALL:-1}" # set to 0 to leave the host firewall untouched
-FIREWALL_BACKEND="${FIREWALL_BACKEND:-auto}" # auto | raw | firewalld | ufw
+MANAGE_FIREWALL="${WIFI_HOTSPOT_MANAGE_FIREWALL:-${MANAGE_FIREWALL:-1}}" # set to 0 to leave the host firewall untouched
+FIREWALL_BACKEND="${WIFI_HOTSPOT_FIREWALL_BACKEND:-${FIREWALL_BACKEND:-auto}}" # auto | raw | firewalld | ufw
 NFT_TAG="wifi-hotspot"      # comment tag on the nftables rules we add
-SECURITY="${SECURITY:-wpa2}" # wpa2 | wpa3 | mixed (WPA2+WPA3 transition)
-[ -r /etc/wifi-hotspot.conf ] && . /etc/wifi-hotspot.conf
+SECURITY="${WIFI_HOTSPOT_SECURITY:-${SECURITY:-wpa2}}" # wpa2 | wpa3 | mixed (WPA2+WPA3 transition)
+CONF_PATH="${WIFI_HOTSPOT_CONF:-/etc/wifi-hotspot.conf}"
+[ -r "$CONF_PATH" ] && . "$CONF_PATH"
 
-CONF="/etc/hostapd/${AP}.conf"
-PSKFILE="/etc/hostapd/${AP}.psk"
+CONF="${WIFI_HOTSPOT_CONF_HOSTAPD:-/etc/hostapd/${AP}.conf}"
+PSKFILE="${WIFI_HOTSPOT_PSKFILE:-/etc/hostapd/${AP}.psk}"
 DPID="${RUN_DIR}/dnsmasq-${AP}.pid"
 HPID="${RUN_DIR}/hostapd-${AP}.pid"
 STATE="${RUN_DIR}/wifi-hotspot-${AP}.state"
@@ -56,9 +57,14 @@ MODE_CHOSEN=same; P2P_FREQ=0
 
 log(){ printf '[wifi-hotspot] %s\n' "$*" >&2; }
 die(){ log "ERROR: $*"; exit 1; }
-# Validate enumerated settings (typos should not silently fall back).
-case "${SECURITY:-wpa2}" in wpa2|wpa3|mixed) ;; *) die "SECURITY must be one of: wpa2, wpa3, mixed (got '${SECURITY}')" ;; esac
-case "${FIREWALL_BACKEND:-auto}" in auto|raw|firewalld|ufw) ;; *) die "FIREWALL_BACKEND must be one of: auto, raw, firewalld, ufw (got '${FIREWALL_BACKEND}')" ;; esac
+# Validate enumerated settings, but only for commands that act on them,
+# so that teardown/read-only commands (down, status, --version, ...) keep
+# working even when the config contains a typo.
+case "${1:-}" in up|restart|sync|qr)
+  case "${SECURITY:-wpa2}" in wpa2|wpa3|mixed) ;; *) die "SECURITY must be one of: wpa2, wpa3, mixed (got '${SECURITY}')" ;; esac
+  case "${FIREWALL_BACKEND:-auto}" in auto|raw|firewalld|ufw) ;; *) die "FIREWALL_BACKEND must be one of: auto, raw, firewalld, ufw (got '${FIREWALL_BACKEND}')" ;; esac
+  ;;
+esac
 # Re-exec self as root.  pkexec first (no --disable-internal-agent so it can
 # prompt on a terminal when no GUI polkit agent is registered), then sudo.
 as_root(){
@@ -697,9 +703,10 @@ wait_go_iface(){ # $1 = space-separated interface names that existed before
 
 up_p2p(){
   command -v dnsmasq >/dev/null || die "dnsmasq is not installed"
-  if [ "${SECURITY:-wpa2}" != "wpa2" ]; then
-    log "WARNING: Wi-Fi Direct mode supports WPA2 only; running WPA2 despite SECURITY=${SECURITY}"
-  fi
+  case "${SECURITY:-wpa2}" in
+    wpa3)  die "Wi-Fi Direct mode does not support WPA3; use MODE=same, or set SECURITY=mixed/wpa2" ;;
+    mixed) log "WARNING: Wi-Fi Direct mode supports WPA2 only; running WPA2 despite SECURITY=mixed" ;;
+  esac
   # p2p_set_iface must run here, in this shell, to set P2P_IFACE: $(p2p_status)
   # would probe inside a subshell and lose the result.
   command -v wpa_cli >/dev/null 2>&1 || die "cannot use Wi-Fi Direct: $(p2p_reason no-wpa-cli)"
@@ -1026,9 +1033,9 @@ cmd_qr(){
   # Reflect what is actually running, not just the configured preference:
   # Wi-Fi Direct mode is always WPA2 regardless of SECURITY.
   local sec="${SECURITY:-wpa2}"
-  if is_running; then
-    if [ "$(state_get MODE 2>/dev/null || true)" = "p2p" ]; then sec="wpa2"; fi
-  fi
+  # Wi-Fi Direct mode is always WPA2 regardless of SECURITY; read the mode from
+  # the state file without requiring hostapd to be running (p2p never starts it).
+  if [ "$(state_get MODE 2>/dev/null || true)" = "p2p" ]; then sec="wpa2"; fi
   wifi="WIFI:T:WPA;S:${ssid_e};P:${psk_e};H:false;;"
   # Record the resolved mode for the label below.
   SECURITY_RESOLVED="$sec"

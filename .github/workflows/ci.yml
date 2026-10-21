@@ -39,3 +39,6 @@ jobs:
 
       - name: Config validation tests
         run: tests/test_config_validation.sh
+
+      - name: QR label tests
+        run: tests/test_qr_label.sh
