@@ -237,6 +237,29 @@ When 0, the script makes no firewall, forwarding or NAT changes at all.
 Set this if you manage the firewall yourself (see
 .BR FIREWALL ).
 .TP
+.B SECURITY="wpa2"
+Security mode for hostapd
+.RB ( same )
+mode:
+.BR wpa2 ,
+.B wpa3
+(WPA3-SAE, PMF required) or
+.B mixed
+(WPA2+WPA3 transition mode).  Wi-Fi Direct
+.RB ( p2p )
+mode is always WPA2 regardless of this setting.
+.TP
+.B FIREWALL_BACKEND="auto"
+Which firewall backend to use:
+.BR auto ,
+.BR raw ,
+.B firewalld
+or
+.BR ufw .
+.B auto
+prefers an active firewalld or ufw, otherwise
+.BR raw .
+.TP
 .B MODE="auto"
 Which way to run the hotspot:
 .RS
@@ -342,6 +365,23 @@ and are deleted again on
 No nftables rules are added if the
 .I ip filter
 table does not exist.
+.PP
+When a firewall front-end is active,
+.B wifi-hotspot
+uses it directly:
+.B firewalld
+via
+.BR firewall-cmd (1)
+and
+.B ufw
+via
+.BR ufw (8).
+In both cases the scoped direct/iptables NAT rule for the AP subnet is
+still added, since
+.B ufw
+has no runtime NAT.  Set
+.B FIREWALL_BACKEND
+to override detection.
 .SH FILES
 .TP
 .I /usr/local/bin/wifi\-hotspot

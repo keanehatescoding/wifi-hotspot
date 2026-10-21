@@ -36,3 +36,6 @@ jobs:
 
       - name: iw parsing tests
         run: tests/test_iw_parse.sh
+
+      - name: Config validation tests
+        run: tests/test_config_validation.sh

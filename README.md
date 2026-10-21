@@ -180,6 +180,8 @@ Edit `/etc/wifi-hotspot.conf`:
 #MODE="auto"          # auto | same | p2p
 #P2P_BAND="bg"        # group channel band when p2p: bg | a
 #P2P_CHANNEL="auto"   # group channel, or a number
+#SECURITY="wpa2"      # wpa2 | wpa3 | mixed (hostapd mode only; p2p is WPA2)
+#FIREWALL_BACKEND="auto"  # auto | raw | firewalld | ufw
 ```
 
 The Wi-Fi password is read once from your NetworkManager profile (or generated)
@@ -199,6 +201,12 @@ and stored in `/etc/hostapd/ap0.psk`. To change it, delete that file and run
 - **`p2p` is experimental** (see above), only used when the uplink channel cannot
   host an AP, and needs a driver that allows a group owner on its own channel next
   to a client connection.
+- **WPA3 (`SECURITY=wpa3`/`mixed`)** only applies to hostapd (`same`) mode;
+  Wi-Fi Direct (`p2p`) mode is always WPA2. `MODE=auto` may fall back to
+  `p2p` on DFS/no-IR uplinks, in which case a warning is logged.
+- **Firewall backends**: `auto` prefers an active firewalld or ufw and uses
+  their CLIs; otherwise raw iptables+nftables (tagged rules). ufw has no
+  runtime NAT, so the tagged iptables MASQUERADE rule is still added.
 
 ## Troubleshooting
 
