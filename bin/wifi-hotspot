@@ -35,16 +35,21 @@ WPA_CTRL_DIR="/run/wpa_supplicant"
 SELF="$(readlink -f -- "$0")"
 VERSION="0.2.3"
 HW=g; CH=0; DFS=0
-MANAGE_FIREWALL="${WIFI_HOTSPOT_MANAGE_FIREWALL:-${MANAGE_FIREWALL:-1}}" # set to 0 to leave the host firewall untouched
-FIREWALL_BACKEND="${WIFI_HOTSPOT_FIREWALL_BACKEND:-${FIREWALL_BACKEND:-auto}}" # auto | raw | firewalld | ufw
+MANAGE_FIREWALL="${WIFI_HOTSPOT_MANAGE_FIREWALL:-1}" # set to 0 to leave the host firewall untouched
+FIREWALL_BACKEND="${WIFI_HOTSPOT_FIREWALL_BACKEND:-auto}" # auto | raw | firewalld | ufw
 NFT_TAG="wifi-hotspot"      # comment tag on the nftables rules we add
-SECURITY="${WIFI_HOTSPOT_SECURITY:-${SECURITY:-wpa2}}" # wpa2 | wpa3 | mixed (WPA2+WPA3 transition)
-CONF_PATH="${WIFI_HOTSPOT_CONF:-/etc/wifi-hotspot.conf}"
+SECURITY="${WIFI_HOTSPOT_SECURITY:-wpa2}" # wpa2 | wpa3 | mixed (WPA2+WPA3 transition)
+if [ "${WIFI_HOTSPOT_TEST_MODE:-}" = "1" ]; then
+  CONF_PATH="${WIFI_HOTSPOT_CONF:-/etc/wifi-hotspot.conf}"
+  CONF="${WIFI_HOTSPOT_CONF_HOSTAPD:-/etc/hostapd/${AP}.conf}"
+  PSKFILE="${WIFI_HOTSPOT_PSKFILE:-/etc/hostapd/${AP}.psk}"
+else
+  CONF_PATH="/etc/wifi-hotspot.conf"
+  CONF="/etc/hostapd/${AP}.conf"
+  PSKFILE="/etc/hostapd/${AP}.psk"
+fi
 # shellcheck disable=SC1090
 [ -r "$CONF_PATH" ] && . "$CONF_PATH"
-
-CONF="${WIFI_HOTSPOT_CONF_HOSTAPD:-/etc/hostapd/${AP}.conf}"
-PSKFILE="${WIFI_HOTSPOT_PSKFILE:-/etc/hostapd/${AP}.psk}"
 DPID="${RUN_DIR}/dnsmasq-${AP}.pid"
 HPID="${RUN_DIR}/hostapd-${AP}.pid"
 STATE="${RUN_DIR}/wifi-hotspot-${AP}.state"
@@ -703,11 +708,11 @@ wait_go_iface(){ # $1 = space-separated interface names that existed before
 }
 
 up_p2p(){
-  command -v dnsmasq >/dev/null || die "dnsmasq is not installed"
   case "${SECURITY:-wpa2}" in
     wpa3)  die "Wi-Fi Direct mode does not support WPA3; use MODE=same, or set SECURITY=mixed/wpa2" ;;
     mixed) log "WARNING: Wi-Fi Direct mode supports WPA2 only; running WPA2 despite SECURITY=mixed" ;;
   esac
+  command -v dnsmasq >/dev/null || die "dnsmasq is not installed"
   # p2p_set_iface must run here, in this shell, to set P2P_IFACE: $(p2p_status)
   # would probe inside a subshell and lose the result.
   command -v wpa_cli >/dev/null 2>&1 || die "cannot use Wi-Fi Direct: $(p2p_reason no-wpa-cli)"
@@ -759,7 +764,9 @@ choose_mode(){
     same) MODE_CHOSEN=same ;;
     p2p)  MODE_CHOSEN=p2p ;;
     auto)
-      if [ "$CAN_HOST" = 1 ] && [ "$HAVE_DFS" = 0 ]; then
+      if [ "${SECURITY:-wpa2}" = "wpa3" ]; then
+        MODE_CHOSEN=same                 # WPA3 is not supported in p2p mode
+      elif [ "$CAN_HOST" = 1 ] && [ "$HAVE_DFS" = 0 ]; then
         MODE_CHOSEN=same                 # the client's channel can host an AP
       elif [ "$CAP_P2PGO" = 1 ] && p2p_ready; then
         MODE_CHOSEN=p2p                  # it can't; give the group a channel of its own

@@ -247,7 +247,15 @@ mode:
 .B mixed
 (WPA2+WPA3 transition mode).  Wi-Fi Direct
 .RB ( p2p )
-mode is always WPA2 regardless of this setting.
+mode is always WPA2 regardless of this setting; with
+.B SECURITY=wpa3
+and
+.BR MODE=auto ,
+hostapd mode is preferred even on DFS channels, and
+.B "wifi-hotspot up"
+refuses to start in
+.B p2p
+mode.
 .TP
 .B FIREWALL_BACKEND="auto"
 Which firewall backend to use:

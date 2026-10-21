@@ -202,8 +202,10 @@ and stored in `/etc/hostapd/ap0.psk`. To change it, delete that file and run
   host an AP, and needs a driver that allows a group owner on its own channel next
   to a client connection.
 - **WPA3 (`SECURITY=wpa3`/`mixed`)** only applies to hostapd (`same`) mode;
-  Wi-Fi Direct (`p2p`) mode is always WPA2. `MODE=auto` may fall back to
-  `p2p` on DFS/no-IR uplinks, in which case a warning is logged.
+  Wi-Fi Direct (`p2p`) mode is always WPA2. With `SECURITY=wpa3`, `MODE=auto`
+  prefers hostapd even on DFS channels (with a radar check) rather than
+  falling back to `p2p`; if `p2p` is forced (`MODE=p2p`), `up` refuses
+  to start. With `mixed`, a warning is logged and WPA2 is used.
 - **Firewall backends**: `auto` prefers an active firewalld or ufw and uses
   their CLIs; otherwise raw iptables+nftables (tagged rules). ufw has no
   runtime NAT, so the tagged iptables MASQUERADE rule is still added.

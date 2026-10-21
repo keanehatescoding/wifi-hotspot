@@ -7,7 +7,15 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$HERE/bin/wifi-hotspot"
 FAIL=0
 
-# Invalid values must be rejected by `up` (validation runs before elevation).
+# Source the script with $1=up so load-time validation runs, but dispatch is
+# skipped (TEST_MODE), avoiding any privileged side effects.
+src_up() { # $1 = env string
+  env WIFI_HOTSPOT_TEST_MODE=1 $1 bash -c 'source "$1" up' _ "$SRC" >/dev/null 2>&1
+}
+
+echo "=== test_config_validation.sh ==="
+
+# Invalid values must be rejected (non-zero exit).
 for envstr in \
   "WIFI_HOTSPOT_SECURITY=WPA3" \
   "WIFI_HOTSPOT_SECURITY=wap3" \
@@ -16,40 +24,35 @@ for envstr in \
   "WIFI_HOTSPOT_FIREWALL_BACKEND=firewald" \
   "WIFI_HOTSPOT_FIREWALL_BACKEND=bar"; do
   set +e
-  env $envstr "$SRC" up >/dev/null 2>&1
+  src_up "$envstr"
   rc=$?
   set -e
   if [ "$rc" -eq 0 ]; then echo "  FAIL: expected failure for: $envstr"; FAIL=1
   else echo "  ok: rejected: $envstr"; fi
 done
 
-# Invalid values must NOT block teardown/read-only commands.
+# Invalid values must NOT block teardown/read-only commands (no validation).
 for envstr in \
   "WIFI_HOTSPOT_SECURITY=WPA3" \
   "WIFI_HOTSPOT_FIREWALL_BACKEND=UFW"; do
   set +e
-  env $envstr "$SRC" --version >/dev/null 2>&1
+  env WIFI_HOTSPOT_TEST_MODE=1 $envstr "$SRC" --version >/dev/null 2>&1
   rc=$?
   set -e
   if [ "$rc" -ne 0 ]; then echo "  FAIL: --version blocked by: $envstr"; FAIL=1
   else echo "  ok: --version allowed with: $envstr"; fi
 done
 
-# Valid values must be accepted (fail later, not on validation).
+# Valid values must be accepted (no "must be one of" error).
 for v in "" wpa2 wpa3 mixed; do
-  set +e
-  env WIFI_HOTSPOT_SECURITY="$v" "$SRC" up >/dev/null 2>&1
-  rc=$?
-  set -e
-  # up will fail for other reasons (no SSID/COUNTRY), but not with the
-  # validation error message. Accept any non-validation failure (rc != 0 is fine).
-  # We only fail the test if the error mentions "must be one of".
-  if env WIFI_HOTSPOT_SECURITY="$v" "$SRC" up 2>&1 | grep -q "must be one of"; then
+  out=$(env WIFI_HOTSPOT_TEST_MODE=1 WIFI_HOTSPOT_SECURITY="$v" bash -c 'source "$1" up' _ "$SRC" 2>&1)
+  if echo "$out" | grep -q "must be one of"; then
     echo "  FAIL: valid SECURITY='$v' rejected"; FAIL=1
   else echo "  ok: valid SECURITY='$v' accepted"; fi
 done
 for v in "" auto raw firewalld ufw; do
-  if env WIFI_HOTSPOT_FIREWALL_BACKEND="$v" "$SRC" up 2>&1 | grep -q "must be one of"; then
+  out=$(env WIFI_HOTSPOT_TEST_MODE=1 WIFI_HOTSPOT_FIREWALL_BACKEND="$v" bash -c 'source "$1" up' _ "$SRC" 2>&1)
+  if echo "$out" | grep -q "must be one of"; then
     echo "  FAIL: valid FIREWALL_BACKEND='$v' rejected"; FAIL=1
   else echo "  ok: valid FIREWALL_BACKEND='$v' accepted"; fi
 done

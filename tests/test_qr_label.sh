@@ -11,7 +11,7 @@ FAIL=0
 run_qr() { # $1 = SECURITY value, $2 = state mode (or empty)
   local sec="$1" mode="$2"
   local conf="$TMPROOT/conf" psk="$TMPROOT/psk" run="$TMPROOT/run" state="$TMPROOT/run/wifi-hotspot-ap0.state"
-  mkdir -p "$run" /tmp/scratchpad 2>/dev/null
+  mkdir -p "$run"
   rm -f "$state"
   if [ -n "$mode" ]; then printf 'MODE=%s\nAP_IF=ap0\n' "$mode" > "$state"; fi
   printf 'SSID="TestNet"\nCOUNTRY="US"\nSECURITY="%s"\nRUN_DIR="%s"\n' "$sec" "$run" > "$conf"
