@@ -30,6 +30,10 @@ check() { # $1 = expected label, $2 = SECURITY, $3 = mode
   fi
 }
 
+if ! command -v qrencode >/dev/null 2>&1; then
+  echo "=== test_qr_label.sh SKIPPED (qrencode not installed) ==="
+  exit 0
+fi
 echo "=== test_qr_label.sh ==="
 check "Security: WPA3 (SAE)"        wpa3 ""
 check "Security: WPA2 (WPA-PSK)"    wpa3 "p2p"

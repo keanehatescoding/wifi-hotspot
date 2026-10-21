@@ -42,3 +42,6 @@ jobs:
 
       - name: QR label tests
         run: tests/test_qr_label.sh
+
+      - name: WPA3 mode tests
+        run: tests/test_wpa3_mode.sh

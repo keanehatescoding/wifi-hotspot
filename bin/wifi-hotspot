@@ -856,6 +856,9 @@ cmd_up(){
   elif [ "$CAN_HOST" != 1 ]; then
     # Refuse up front with a clear reason instead of letting hostapd fail.
     if p2p_ready; then
+      if [ "${SECURITY:-wpa2}" = "wpa3" ]; then
+        die "cannot share this connection: $(chan_label "$freq") cannot host an access point ($(host_reason "$freq")); connect on a channel that can host an AP, or set SECURITY=mixed or wpa2"
+      fi
       die "cannot share this connection: $(chan_label "$freq") cannot host an access point ($(host_reason "$freq")); use --mode p2p or MODE=auto"
     fi
     die "cannot share this connection: $(chan_label "$freq") cannot host an access point ($(host_reason "$freq")) and Wi-Fi Direct is unavailable ($(p2p_reason "$(p2p_status)"))"
