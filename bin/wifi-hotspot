@@ -768,8 +768,8 @@ choose_mode(){
         MODE_CHOSEN=same                 # WPA3 is not supported in p2p mode
       elif [ "$CAN_HOST" = 1 ] && [ "$HAVE_DFS" = 0 ]; then
         MODE_CHOSEN=same                 # the client's channel can host an AP
-      elif [ "$CAP_P2PGO" = 1 ] && p2p_ready; then
-        MODE_CHOSEN=p2p                  # it can't; give the group a channel of its own
+      elif [ "$CAN_HOST" != 1 ] && [ "$CAP_P2PGO" = 1 ] && p2p_ready; then
+        MODE_CHOSEN=p2p                  # channel cannot host AP; give the group a channel of its own
       else
         MODE_CHOSEN=same                 # DFS (works, just slow) or an error in up_same
       fi ;;
