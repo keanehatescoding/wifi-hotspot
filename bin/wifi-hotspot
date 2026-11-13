@@ -926,7 +926,7 @@ cmd_status(){
   printf 'ap     %-6s: ' "$apif"; iw dev "$apif" info 2>/dev/null | awk '/type|channel/{printf "%s ",$0} END{print ""}' || true
   printf 'hostapd      : '; if is_running; then echo running; else echo stopped; fi
   printf 'dnsmasq      : '; if { [ -f "$DPID" ] && kill -0 "$(cat "$DPID")" 2>/dev/null; } || pgrep -f "dnsmasq.*--interface=${apif}" >/dev/null 2>&1; then echo running; else echo stopped; fi
-  printf 'nat          : '; if iptables -t nat -S POSTROUTING 2>/dev/null | grep -q -- "-o ${CLIENT} -j MASQUERADE"; then echo present; elif [ "$(id -u)" -ne 0 ]; then echo "? (need root)"; else echo absent; fi
+  printf 'nat          : '; if iptables -t nat -C POSTROUTING -s "$AP_ADDR/$AP_PREFIX" -o "$CLIENT" -m comment --comment "$NFT_TAG" -j MASQUERADE 2>/dev/null; then echo present; elif iptables -t nat -S POSTROUTING 2>/dev/null | grep -q -- "-o ${CLIENT} -j MASQUERADE"; then echo present; elif [ "$(id -u)" -ne 0 ]; then echo "? (need root)"; else echo absent; fi
 }
 
 cmd_detect(){
