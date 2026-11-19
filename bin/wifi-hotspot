@@ -906,6 +906,34 @@ cmd_sync(){
   fi
 }
 
+# Is the hotspot's NAT rule present?  Echoes "present" or "absent".
+# The firewall backend matters: firewalld keeps its direct rules in its own
+# ruleset, where iptables cannot see them, so status must ask firewalld.
+nat_present(){
+  local backend
+  backend=$(cat /run/wifi-hotspot-fw-backend 2>/dev/null || true)
+  [ -n "$backend" ] || backend=$(firewall_backend)
+  case "$backend" in
+    firewalld)
+      command -v firewall-cmd >/dev/null 2>&1 || { echo absent; return 0; }
+      if firewall-cmd --direct --query-rule ipv4 nat POSTROUTING 0 \
+           -s "$AP_ADDR/$AP_PREFIX" -o "$CLIENT" -j MASQUERADE >/dev/null 2>&1; then
+        echo present
+      else
+        echo absent
+      fi ;;
+    *)
+      if iptables -t nat -C POSTROUTING -s "$AP_ADDR/$AP_PREFIX" -o "$CLIENT" \
+           -m comment --comment "$NFT_TAG" -j MASQUERADE 2>/dev/null; then
+        echo present
+      elif iptables -t nat -S POSTROUTING 2>/dev/null | grep -q -- "-o ${CLIENT} -j MASQUERADE"; then
+        echo present
+      else
+        echo absent
+      fi ;;
+  esac
+}
+
 cmd_status(){
   local mode apif g ss
   mode=$(state_get MODE || true); apif=$(state_get AP_IF || true)
@@ -926,7 +954,14 @@ cmd_status(){
   printf 'ap     %-6s: ' "$apif"; iw dev "$apif" info 2>/dev/null | awk '/type|channel/{printf "%s ",$0} END{print ""}' || true
   printf 'hostapd      : '; if is_running; then echo running; else echo stopped; fi
   printf 'dnsmasq      : '; if { [ -f "$DPID" ] && kill -0 "$(cat "$DPID")" 2>/dev/null; } || pgrep -f "dnsmasq.*--interface=${apif}" >/dev/null 2>&1; then echo running; else echo stopped; fi
-  printf 'nat          : '; if iptables -t nat -C POSTROUTING -s "$AP_ADDR/$AP_PREFIX" -o "$CLIENT" -m comment --comment "$NFT_TAG" -j MASQUERADE 2>/dev/null; then echo present; elif iptables -t nat -S POSTROUTING 2>/dev/null | grep -q -- "-o ${CLIENT} -j MASQUERADE"; then echo present; elif [ "$(id -u)" -ne 0 ]; then echo "? (need root)"; else echo absent; fi
+  printf 'nat          : '
+  if [ "$(nat_present)" = present ]; then
+    echo present
+  elif [ "$(id -u)" -ne 0 ]; then
+    echo "? (need root)"
+  else
+    echo absent
+  fi
 }
 
 cmd_detect(){
