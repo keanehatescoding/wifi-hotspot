@@ -430,7 +430,8 @@ remove_fw(){
     sysctl -qw "net.ipv4.ip_forward=$(cat /run/wifi-hotspot-ip_forward)" 2>/dev/null || true
     rm -f /run/wifi-hotspot-ip_forward
   fi
-  local backend; backend=$(cat /run/wifi-hotspot-fw-backend 2>/dev/null || firewall_backend)
+  local backend; backend=$(cat /run/wifi-hotspot-fw-backend 2>/dev/null || true)
+  [ -n "$backend" ] || backend=$(firewall_backend)
   rm -f /run/wifi-hotspot-fw-backend
   case "$backend" in
     firewalld) remove_fw_firewalld ;;
