@@ -425,6 +425,7 @@ remove_fw_ufw(){
 }
 
 remove_fw(){
+  [ "$MANAGE_FIREWALL" = 1 ] || return 0
   # Restore ip_forward to whatever it was before `up`.
   if [ -f /run/wifi-hotspot-ip_forward ]; then
     sysctl -qw "net.ipv4.ip_forward=$(cat /run/wifi-hotspot-ip_forward)" 2>/dev/null || true
